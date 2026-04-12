@@ -26,6 +26,8 @@ This project now builds a free public GitHub Pages site for finding chess tourna
 
 `Official Chess` remains the highest-quality structured source because it exposes event creation and modification timestamps, venue details, organizers, and direct source URLs. The app also pulls from additional organizer and calendar pages to improve coverage across New York, New Jersey, and nearby scholastic events.
 
+For `littlehouseofchess.org`, the build also keeps a tracked fallback snapshot so GitHub-hosted rebuilds do not drop that source entirely if Little House temporarily rate-limits or blocks a runner IP.
+
 ## Install dependencies
 
 ```powershell

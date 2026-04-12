@@ -41,6 +41,7 @@ DEFAULT_CACHE_DIR = Path("data")
 DEFAULT_CACHE_FILE = DEFAULT_CACHE_DIR / "tournaments_cache.json"
 DEFAULT_COORD_CACHE_FILE = DEFAULT_CACHE_DIR / "coordinate_cache.json"
 DEFAULT_OUTPUT_DIR = Path("output")
+DEFAULT_SEED_DIR = Path("seed_data")
 OFFICIAL_CHESS_SOURCE_URL = "https://officialchess.org/events/list/"
 OFFICIAL_CHESS_SITE_ROOT = "https://officialchess.org"
 LITTLE_HOUSE_SOURCE_URL = "https://littlehouseofchess.org/calendar/"
@@ -59,6 +60,7 @@ US_CHESS_SOURCE_URL = (
     "field_geofield_proximity%5Bsource_configuration%5D%5Borigin_address%5D="
 )
 ZIP_LOOKUP_URL_TEMPLATE = "https://api.zippopotam.us/us/{postal_code}"
+LITTLE_HOUSE_SEED_FILE = DEFAULT_SEED_DIR / "little_house_events.json"
 
 KEYWORD_SCHOLASTIC = (
     "scholastic",
@@ -611,6 +613,16 @@ def load_json_file(path: Path) -> dict[str, object]:
 def save_json_file(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def load_seed_events(path: Path) -> list[Event]:
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    return [Event.from_record(item) for item in payload.get("events", []) or []]
 
 
 def extract_urls_from_html(html_text: str) -> list[str]:
@@ -1574,21 +1586,34 @@ def collect_events(session: requests.Session, months_ahead: int = DEFAULT_MONTHS
     collected: list[Event] = []
     errors: list[str] = []
 
-    for label, collector in (
-        ("Official Chess", lambda: collect_official_chess(session, months_ahead=months_ahead)),
-        ("Little House of Chess", lambda: collect_little_house_of_chess(session, months_ahead=months_ahead)),
-        ("US Chess", lambda: collect_us_chess(session)),
-        ("Events4Chess", lambda: collect_events4chess(session)),
-        ("Chess In The Schools", lambda: parse_chess_in_the_schools_tournaments(session)),
-        ("Chess Father", lambda: parse_chess_father_tournaments(session)),
-        ("Tri-State Chess", lambda: parse_tristate_registration(session)),
-        ("ICA NJ", lambda: parse_icanj_calendar(session)),
-        ("Westchester Chess Club", lambda: parse_westchester_schedule(session)),
+    for label, collector, seed_file in (
+        ("Official Chess", lambda: collect_official_chess(session, months_ahead=months_ahead), None),
+        (
+            "Little House of Chess",
+            lambda: collect_little_house_of_chess(session, months_ahead=months_ahead),
+            LITTLE_HOUSE_SEED_FILE,
+        ),
+        ("US Chess", lambda: collect_us_chess(session), None),
+        ("Events4Chess", lambda: collect_events4chess(session), None),
+        ("Chess In The Schools", lambda: parse_chess_in_the_schools_tournaments(session), None),
+        ("Chess Father", lambda: parse_chess_father_tournaments(session), None),
+        ("Tri-State Chess", lambda: parse_tristate_registration(session), None),
+        ("ICA NJ", lambda: parse_icanj_calendar(session), None),
+        ("Westchester Chess Club", lambda: parse_westchester_schedule(session), None),
     ):
         try:
-            collected.extend(collector())
+            source_events = collector()
+            if source_events:
+                collected.extend(source_events)
+                continue
+            raise RuntimeError("source returned no events")
         except Exception as exc:
-            errors.append(f"{label}: {exc}")
+            fallback_events = load_seed_events(seed_file) if seed_file is not None else []
+            if fallback_events:
+                collected.extend(fallback_events)
+                errors.append(f"{label}: {exc} (using tracked seed fallback)")
+            else:
+                errors.append(f"{label}: {exc}")
 
     if not collected:
         raise RuntimeError("No sources refreshed successfully. " + " | ".join(errors))
