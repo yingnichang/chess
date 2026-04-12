@@ -152,7 +152,23 @@ class Event:
     distance_air_miles: float | None = None
     estimated_drive_minutes: int | None = None
     tags: list[str] = field(default_factory=list)
+    contributing_sources: list[str] = field(default_factory=list)
+    contributing_providers: list[str] = field(default_factory=list)
     dedupe_key: str = field(default="", repr=False)
+
+    def __post_init__(self) -> None:
+        source_values = [
+            clean_text(value)
+            for value in [*self.contributing_sources, self.source]
+            if clean_text(value)
+        ]
+        provider_values = [
+            clean_text(value)
+            for value in [*self.contributing_providers, self.provider]
+            if clean_text(value)
+        ]
+        self.contributing_sources = list(dict.fromkeys(source_values))
+        self.contributing_providers = list(dict.fromkeys(provider_values))
 
     @property
     def primary_link(self) -> str:
@@ -200,6 +216,8 @@ class Event:
             "distance_air_miles": self.distance_air_miles,
             "estimated_drive_minutes": self.estimated_drive_minutes,
             "tags": self.tags,
+            "contributing_sources": self.contributing_sources,
+            "contributing_providers": self.contributing_providers,
         }
 
     @classmethod
@@ -236,6 +254,8 @@ class Event:
             distance_air_miles=to_float(record.get("distance_air_miles")),
             estimated_drive_minutes=to_int(record.get("estimated_drive_minutes")),
             tags=[str(tag) for tag in record.get("tags", []) or []],
+            contributing_sources=[str(tag) for tag in record.get("contributing_sources", []) or []],
+            contributing_providers=[str(tag) for tag in record.get("contributing_providers", []) or []],
         )
 
 
@@ -495,6 +515,7 @@ def is_social_or_platform_link(url: str) -> bool:
             "uscfsales.com",
             "skvare.com/uscf",
             "privacy-policy",
+            "search/posts?query=%23",
         )
     )
 
@@ -933,14 +954,153 @@ def parse_little_house_event_page(session: requests.Session, event_url: str) -> 
     return classify_event_fit(event)
 
 
+def parse_little_house_calendar_article(article: BeautifulSoup) -> Event | None:
+    modal = article.select_one(".mec-single-event")
+    if modal is None:
+        return None
+
+    title_node = article.select_one(".mec-toggle-title")
+    title = clean_text(title_node.get_text(" ", strip=True) if title_node else "")
+    if not title:
+        return None
+
+    description_node = modal.select_one(".mec-single-event-description")
+    description = clean_text(
+        description_node.get_text(" ", strip=True) if description_node else modal.get_text(" ", strip=True)
+    )
+    summary = summarize_text(description or title)
+
+    register_link = modal.select_one(".mec-booking-button[href]")
+    organizer_website_link = modal.select_one(".mec-organizer-url a[href]")
+    more_info_link = modal.select_one(".mec-more-info-button[href]")
+    google_calendar_link = modal.select_one(".mec-events-gcal[href]")
+
+    start = None
+    end = None
+    if google_calendar_link is not None:
+        start, end = split_google_calendar_dates(clean_text(google_calendar_link.get("href")))
+
+    venue_name = ""
+    address = ""
+    location_box = modal.select_one(".mec-single-event-location")
+    if location_box is not None:
+        venue_node = location_box.select_one(".author.fn.org")
+        address_node = location_box.select_one(".mec-address")
+        venue_name = clean_text(venue_node.get_text(" ", strip=True) if venue_node else "")
+        address = clean_text(address_node.get_text(" ", strip=True) if address_node else "")
+
+    city, state, postal_code = parse_city_state_postal(address)
+    if not city or not state:
+        city, state = parse_city_state_label(address)
+
+    organizer_box = modal.select_one(".mec-single-event-organizer")
+    organizer = ""
+    if organizer_box is not None:
+        organizer_node = organizer_box.select_one(".mec-organizer h6")
+        organizer = clean_text(organizer_node.get_text(" ", strip=True) if organizer_node else "")
+
+    description_links = []
+    if description_node is not None:
+        description_links = [
+            href
+            for href in (link.get("href") for link in description_node.select("a[href]"))
+            if href and href.startswith("http")
+        ]
+
+    modal_links = [
+        href
+        for href in (link.get("href") for link in modal.select("a[href]"))
+        if href and href.startswith("http")
+    ]
+    preferred_external = first_external_link(
+        [canonicalize_url(more_info_link.get("href", ""))] if more_info_link is not None else [],
+        excluded_domains=("littlehouseofchess.org",),
+    ) or first_external_link(
+        [*description_links, *modal_links],
+        excluded_domains=("littlehouseofchess.org",),
+    )
+
+    registration_url = (
+        canonicalize_url(register_link.get("href", ""))
+        if register_link is not None
+        else canonicalize_url(organizer_website_link.get("href", ""))
+        if organizer_website_link is not None
+        else preferred_external
+        or LITTLE_HOUSE_SOURCE_URL
+    )
+    event_url = (
+        canonicalize_url(more_info_link.get("href", ""))
+        if more_info_link is not None
+        else preferred_external or registration_url
+    )
+
+    if not organizer:
+        organizer = "Little House of Chess"
+
+    category = clean_text(
+        " | ".join(link.get_text(" ", strip=True) for link in modal.select(".mec-events-event-categories a"))
+    )
+    time_control = clean_text(
+        " ".join(
+            re.findall(
+                r"(Game/\d+\s*,?\s*d\d+|G/\d+\s*,?\s*d\d+|Game/\d+|G/\d+)",
+                description,
+                flags=re.IGNORECASE,
+            )
+        )
+    )
+
+    event = Event(
+        provider="little_house_of_chess",
+        source="Little House of Chess",
+        title=title,
+        start=start,
+        end=end,
+        event_url=event_url,
+        registration_url=registration_url,
+        source_url=LITTLE_HOUSE_SOURCE_URL,
+        venue_name=venue_name,
+        address=address,
+        city=city,
+        state=state,
+        postal_code=postal_code,
+        organizer=organizer,
+        summary=summary,
+        description=description,
+        sections=category,
+        entry_fee=extract_entry_fee(description),
+        time_control=time_control,
+    )
+    return classify_event_fit(event)
+
+
+def collect_little_house_calendar(session: requests.Session, months_ahead: int) -> list[Event]:
+    response = session.get(LITTLE_HOUSE_SOURCE_URL, timeout=30)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+    start_day = date.today()
+    end_day = start_day + timedelta(days=31 * months_ahead)
+    events: list[Event] = []
+
+    for article in soup.select(".mec-event-article"):
+        event = parse_little_house_calendar_article(article)
+        if event is None or event.start is None:
+            continue
+        if event.start.date() < start_day or event.start.date() > end_day:
+            continue
+        events.append(event)
+
+    return events
+
+
 def collect_little_house_of_chess(session: requests.Session, months_ahead: int) -> list[Event]:
+    combined_events = collect_little_house_calendar(session, months_ahead=months_ahead)
     response = session.get("https://littlehouseofchess.org/mec-events-sitemap.xml", timeout=30)
     response.raise_for_status()
     root = ET.fromstring(response.text)
     namespace = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
     start_day = date.today()
     end_day = start_day + timedelta(days=31 * months_ahead)
-    events: list[Event] = []
 
     for loc in root.findall(".//sm:loc", namespace):
         event_url = clean_text(loc.text)
@@ -954,9 +1114,9 @@ def collect_little_house_of_chess(session: requests.Session, months_ahead: int) 
             continue
         if event.start.date() < start_day or event.start.date() > end_day:
             continue
-        events.append(event)
+        combined_events.append(event)
 
-    return events
+    return dedupe_events(combined_events)
 
 
 def solve_sucuri_cookie_challenge(session: requests.Session, response_text: str) -> bool:
@@ -1137,7 +1297,7 @@ def parse_us_chess_detail(detail_url: str, session: requests.Session) -> dict[st
 def collect_us_chess(session: requests.Session) -> list[Event]:
     events: list[Event] = []
     page = 0
-    seen_titles: set[str] = set()
+    seen_urls: set[str] = set()
 
     while True:
         page_url = f"{US_CHESS_SOURCE_URL}&page={page}"
@@ -1153,11 +1313,10 @@ def collect_us_chess(session: requests.Session) -> list[Event]:
             if title_link is None:
                 continue
             title = clean_text(title_link.get_text(" ", strip=True))
-            if not title or title in seen_titles:
-                continue
-            seen_titles.add(title)
-
             detail_url = canonicalize_url(urljoin("https://new.uschess.org", title_link.get("href", "")))
+            if not title or not detail_url or detail_url in seen_urls:
+                continue
+            seen_urls.add(detail_url)
             address_node = row.select_one(".address")
             address_label = clean_text(address_node.get_text(" ", strip=True) if address_node else "")
             city, state = parse_city_state_label(address_label)
@@ -1713,6 +1872,12 @@ def merge_events(primary: Event, secondary: Event) -> Event:
         merged.longitude = loser.longitude
 
     merged.tags = sorted({*merged.tags, *loser.tags})
+    merged.contributing_sources = list(
+        dict.fromkeys([*winner.contributing_sources, *loser.contributing_sources])
+    )
+    merged.contributing_providers = list(
+        dict.fromkeys([*winner.contributing_providers, *loser.contributing_providers])
+    )
     classify_event_fit(merged)
     return merged
 
@@ -1809,7 +1974,7 @@ def filter_events(
             continue
         if city_filter and event.city not in city_filter:
             continue
-        if source_filter and event.source not in source_filter:
+        if source_filter and not set(event.contributing_sources or [event.source]).intersection(source_filter):
             continue
         if scholastic_only and not (
             event.age_fit == "good" or clean_text(event.scholastic_only).lower().startswith("yes")
@@ -1830,6 +1995,7 @@ def filter_events(
                     event.state,
                     event.summary,
                     event.sections,
+                    " ".join(event.contributing_sources),
                 ]
             ).lower()
             if normalized_search not in haystack:
@@ -1960,6 +2126,7 @@ def event_table_rows(events: Iterable[Event]) -> list[dict[str, str]]:
                 "event_url": event.event_url,
                 "source_url": event.source_url,
                 "summary": event.summary,
+                "contributing_sources": " | ".join(event.contributing_sources),
             }
         )
     return rows
@@ -1993,6 +2160,7 @@ def write_csv(events: Iterable[Event], path: Path) -> None:
         "event_url",
         "source_url",
         "summary",
+        "contributing_sources",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:

@@ -14,11 +14,7 @@ async function init() {
     window.__eventsForCities = events;
 
     populateMultiSelect(ui.states, uniqueValues(events, "state"), defaults.states);
-    populateMultiSelect(
-      ui.sources,
-      uniqueValues(events, "source"),
-      uniqueValues(events, "source")
-    );
+    populateMultiSelect(ui.sources, uniqueSourceValues(events), uniqueSourceValues(events));
     populateMultiSelect(ui.cities, cityOptions(events, defaults.states), []);
 
     applyDefaultsToUi(ui, defaults);
@@ -113,6 +109,7 @@ function bindUi() {
     totalCached: document.getElementById("total-cached"),
     resultsCount: document.getElementById("results-count"),
     metrics: document.getElementById("metrics"),
+    sourceCoverage: document.getElementById("source-coverage"),
     summaryBody: document.getElementById("summary-body"),
     cards: document.getElementById("cards"),
     emptyState: document.getElementById("empty-state"),
@@ -126,6 +123,7 @@ function normalizeEvents(events) {
       ...event,
       title: event.title || "",
       source: event.source || "",
+      allSources: normalizeStringList(event.contributing_sources, event.source),
       city: event.city || "",
       state: event.state || "",
       organizer: event.organizer || "",
@@ -151,6 +149,15 @@ function normalizeEvents(events) {
       longitude: numericOrNull(event.longitude),
     }))
     .filter((event) => event.startDate && !Number.isNaN(event.startDate.getTime()));
+}
+
+function normalizeStringList(values, fallback) {
+  const list = Array.isArray(values) ? values : [];
+  const normalized = list.map((value) => String(value || "").trim()).filter(Boolean);
+  if (!normalized.length && fallback) {
+    normalized.push(String(fallback).trim());
+  }
+  return [...new Set(normalized)];
 }
 
 function numericOrNull(value) {
@@ -182,7 +189,7 @@ function buildDefaults(events) {
       uniqueValues(events, "state").includes(state)
     ),
     cities: [],
-    sources: uniqueValues(events, "source"),
+    sources: uniqueSourceValues(events),
     scholasticOnly: true,
     beginnerFriendly: false,
     sortMode: "recently_updated",
@@ -346,7 +353,10 @@ function filterEvents(events, filters) {
     if (filters.cities.length && !filters.cities.includes(event.city)) {
       return false;
     }
-    if (filters.sources.length && !filters.sources.includes(event.source)) {
+    if (
+      filters.sources.length &&
+      !event.allSources.some((source) => filters.sources.includes(source))
+    ) {
       return false;
     }
     if (
@@ -375,6 +385,7 @@ function filterEvents(events, filters) {
         event.state,
         event.summary,
         event.sections,
+        event.allSources.join(" "),
       ]
         .join(" ")
         .toLowerCase();
@@ -418,6 +429,7 @@ function sortEvents(events, mode) {
 
 function renderEverything(events, filters, ui) {
   renderMetrics(events, filters, ui.metrics);
+  renderSourceCoverage(events, ui.sourceCoverage);
   ui.resultsCount.textContent = String(events.length);
   renderSummary(events.slice(0, 15), ui.summaryBody);
   renderCards(events.slice(0, filters.cardLimit), ui.cards);
@@ -456,6 +468,32 @@ function renderMetrics(events, filters, container) {
     .join("");
 }
 
+function renderSourceCoverage(events, container) {
+  const counts = new Map();
+  events.forEach((event) => {
+    event.allSources.forEach((source) => {
+      counts.set(source, (counts.get(source) || 0) + 1);
+    });
+  });
+
+  const entries = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  if (!entries.length) {
+    container.innerHTML = '<p class="muted">No source coverage to show for the current filters.</p>';
+    return;
+  }
+
+  container.innerHTML = entries
+    .map(
+      ([source, count]) => `
+        <article class="coverage-chip">
+          <span class="coverage-source">${escapeHtml(source)}</span>
+          <strong class="coverage-count">${escapeHtml(String(count))}</strong>
+        </article>
+      `
+    )
+    .join("");
+}
+
 function renderSummary(events, container) {
   if (!events.length) {
     container.innerHTML = `
@@ -475,7 +513,7 @@ function renderSummary(events, container) {
           <td>${escapeHtml(event.title)}</td>
           <td>${escapeHtml(event.locationLabel || "TBD")}</td>
           <td>${escapeHtml(driveLabel(event))}</td>
-          <td>${escapeHtml(event.source)}</td>
+          <td>${escapeHtml(sourceSummaryLabel(event))}</td>
         </tr>
       `
     )
@@ -503,6 +541,7 @@ function renderCards(events, container) {
           <p class="card-line"><strong>Organizer:</strong> ${escapeHtml(
             event.organizer || "Not listed"
           )}</p>
+          ${otherSourcesLine(event)}
           <div class="badge-row">${eventBadges(event).join("")}</div>
           <p class="card-line">${escapeHtml(
             event.summary || "See the source listing for full event details."
@@ -584,7 +623,10 @@ function updateHeader(dataset, totalEvents, ui) {
     ? formatDateTime(new Date(dataset.generated_at))
     : "Unknown";
   ui.sourceCount.textContent = String(
-    new Set((dataset.events || []).map((event) => event.source)).size
+    new Set(
+      (dataset.events || [])
+        .flatMap((event) => normalizeStringList(event.contributing_sources, event.source))
+    ).size
   );
   ui.totalCached.textContent = String(totalEvents);
 
@@ -644,6 +686,12 @@ function selectValues(select, values) {
 
 function uniqueValues(events, key) {
   return [...new Set(events.map((event) => event[key]).filter(Boolean))].sort((a, b) =>
+    String(a).localeCompare(String(b))
+  );
+}
+
+function uniqueSourceValues(events) {
+  return [...new Set(events.flatMap((event) => event.allSources).filter(Boolean))].sort((a, b) =>
     String(a).localeCompare(String(b))
   );
 }
@@ -715,6 +763,26 @@ function driveLabel(event) {
   return Number.isFinite(event.estimatedDriveMinutes)
     ? `${event.estimatedDriveMinutes} min`
     : "";
+}
+
+function sourceSummaryLabel(event) {
+  if (!event.allSources.length) {
+    return event.source || "";
+  }
+  if (event.allSources.length === 1) {
+    return event.allSources[0];
+  }
+  return `${event.source} + ${event.allSources.length - 1} more`;
+}
+
+function otherSourcesLine(event) {
+  const others = event.allSources.filter((source) => source !== event.source);
+  if (!others.length) {
+    return "";
+  }
+  return `<p class="card-line muted"><strong>Also listed on:</strong> ${escapeHtml(
+    others.join(", ")
+  )}</p>`;
 }
 
 function startsWithYes(value) {

@@ -252,6 +252,7 @@ select[multiple] {
 
 .toolbar,
 .table-panel,
+.coverage-panel,
 .empty {
   padding: 18px;
 }
@@ -268,6 +269,32 @@ select[multiple] {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.coverage-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.coverage-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0.7rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid #cbd5e1;
+  background: white;
+}
+
+.coverage-source {
+  color: #0f172a;
+  font-weight: 700;
+}
+
+.coverage-count {
+  color: var(--accent);
 }
 
 .toolbar-links a,
