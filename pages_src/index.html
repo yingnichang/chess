@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>New York Chess Tournament Finder</title>
+  <link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Free Public Chess Calendar</p>
+        <h1>New York area tournaments for parents, updated daily.</h1>
+        <p class="hero-text">
+          Find scholastic and youth-friendly tournaments, sort by freshest updates, and jump straight to the original registration pages.
+        </p>
+      </div>
+      <div class="hero-meta">
+        <div class="meta-chip">
+          <span class="meta-label">Last refresh</span>
+          <strong id="generated-at">Loading...</strong>
+        </div>
+        <div class="meta-chip">
+          <span class="meta-label">Sources</span>
+          <strong id="source-count">-</strong>
+        </div>
+        <div class="meta-chip">
+          <span class="meta-label">Events cached</span>
+          <strong id="total-cached">-</strong>
+        </div>
+      </div>
+    </section>
+
+    <div class="flash hidden" id="flash"></div>
+
+    <div class="layout">
+      <aside class="panel sidebar">
+        <form id="filters-form">
+          <label class="field">
+            <span>Search</span>
+            <input id="search" name="search" type="text" placeholder="School, organizer, venue, city">
+          </label>
+
+          <label class="field">
+            <span>Home ZIP</span>
+            <input id="home-zip" name="homeZip" type="text" inputmode="numeric" placeholder="10583">
+          </label>
+
+          <label class="check">
+            <input id="use-drive-limit" name="useDriveLimit" type="checkbox">
+            <span>Limit to driving range</span>
+          </label>
+
+          <label class="field">
+            <span>Max drive minutes</span>
+            <input id="max-drive-minutes" name="maxDriveMinutes" type="number" min="30" max="240" step="15" value="120">
+          </label>
+
+          <div class="field two-up">
+            <label>
+              <span>Start date</span>
+              <input id="start-date" name="startDate" type="date">
+            </label>
+            <label>
+              <span>End date</span>
+              <input id="end-date" name="endDate" type="date">
+            </label>
+          </div>
+
+          <label class="field">
+            <span>States</span>
+            <select id="states" name="states" multiple></select>
+          </label>
+
+          <label class="field">
+            <span>Cities</span>
+            <select id="cities" name="cities" multiple></select>
+          </label>
+
+          <label class="field">
+            <span>Sources</span>
+            <select id="sources" name="sources" multiple></select>
+          </label>
+
+          <label class="check">
+            <input id="scholastic-only" name="scholasticOnly" type="checkbox" checked>
+            <span>Scholastic / youth oriented</span>
+          </label>
+
+          <label class="check">
+            <input id="beginner-friendly" name="beginnerFriendly" type="checkbox">
+            <span>Beginner-friendly only</span>
+          </label>
+
+          <label class="field">
+            <span>Sort by</span>
+            <select id="sort-mode" name="sortMode">
+              <option value="recently_updated">Recently updated</option>
+              <option value="date">Tournament date</option>
+              <option value="closest">Closest to home</option>
+            </select>
+          </label>
+
+          <div class="button-row">
+            <button class="primary" type="submit">Apply filters</button>
+            <button class="secondary" type="button" id="reset-filters">Reset</button>
+          </div>
+        </form>
+      </aside>
+
+      <main class="content">
+        <section class="metrics" id="metrics"></section>
+
+        <section class="toolbar panel">
+          <div>
+            <strong id="results-count">0</strong> tournaments match the current filters.
+            <p class="muted">Default order favors source freshness, so newly updated tournament listings rise to the top.</p>
+          </div>
+          <div class="toolbar-links">
+            <a href="data/tournaments.csv">Download CSV</a>
+            <a href="data/tournaments.json">Download JSON</a>
+          </div>
+        </section>
+
+        <section class="panel table-panel">
+          <div class="section-header">
+            <h2>Quick scan</h2>
+            <p class="muted">A compact list of the first 15 filtered tournaments.</p>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Updated</th>
+                  <th>Date</th>
+                  <th>Tournament</th>
+                  <th>Location</th>
+                  <th>Drive</th>
+                  <th>Source</th>
+                </tr>
+              </thead>
+              <tbody id="summary-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="cards-header">
+          <div>
+            <h2>Tournament cards</h2>
+            <p class="muted">Parent-friendly summaries with direct source and registration links.</p>
+          </div>
+          <label class="field cards-count">
+            <span>Cards to show</span>
+            <select id="card-limit">
+              <option value="20">20</option>
+              <option value="40">40</option>
+              <option value="80">80</option>
+              <option value="9999">All</option>
+            </select>
+          </label>
+        </section>
+
+        <section id="cards" class="cards"></section>
+        <section id="empty-state" class="panel empty hidden">
+          <h2>No tournaments match these filters.</h2>
+          <p>Try widening the date range, removing the drive filter, or turning off the scholastic-only toggle.</p>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script src="assets/app.js" defer></script>
+</body>
+</html>
