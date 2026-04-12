@@ -15,6 +15,9 @@ This project now builds a free public GitHub Pages site for finding chess tourna
 ## Current data sources
 
 - `officialchess.org` via its live events API
+- `littlehouseofchess.org/calendar/`
+- `www.events4chess.com/events/`
+- `new.uschess.org/upcoming-tournaments` filtered to New York
 - `chessintheschools.org/tournament/`
 - `chessfather.com/tournaments`
 - `tristatechess.com/onlineregistration/`
@@ -22,8 +25,6 @@ This project now builds a free public GitHub Pages site for finding chess tourna
 - `westchesterchessclub.com` schedule page
 
 `Official Chess` remains the highest-quality structured source because it exposes event creation and modification timestamps, venue details, organizers, and direct source URLs. The app also pulls from additional organizer and calendar pages to improve coverage across New York, New Jersey, and nearby scholastic events.
-
-`littlehouseofchess.org` is still a target source, but its public pages and old calendar API currently return HTTP `403` to automated requests from the scraper, so it is not part of the live build until an accessible feed or whitelist is available.
 
 ## Install dependencies
 

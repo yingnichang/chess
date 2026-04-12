@@ -6,11 +6,12 @@ import html
 import json
 import math
 import re
+import warnings
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable
-from urllib.parse import urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -28,6 +29,11 @@ except ImportError:
 
 
 USER_AGENT = "NYChessParentFinder/1.0 (+https://example.com)"
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/135.0.0.0 Safari/537.36"
+)
 DEFAULT_MONTHS_AHEAD = 6
 TARGET_STATES = ("NY", "NJ", "CT")
 DEFAULT_CACHE_DIR = Path("data")
@@ -43,6 +49,13 @@ TRI_STATE_SOURCE_URL = "https://tristatechess.com/onlineregistration/"
 ICA_NJ_SOURCE_URL = "https://www.icanj.net/p.php?p=2122&Tournaments%20Calendar="
 CHESS_IN_THE_SCHOOLS_SOURCE_URL = "https://chessintheschools.org/tournament/"
 CHESS_FATHER_SOURCE_URL = "https://www.chessfather.com/tournaments"
+EVENTS4CHESS_SOURCE_URL = "https://www.events4chess.com/events/?s=0&when=1&activity=1&rpp=100"
+US_CHESS_SOURCE_URL = (
+    "https://new.uschess.org/upcoming-tournaments?combine=&"
+    "field_event_address_administrative_area=NY&field_online_event_value=All&"
+    "field_geofield_proximity%5Bvalue%5D=&"
+    "field_geofield_proximity%5Bsource_configuration%5D%5Borigin_address%5D="
+)
 ZIP_LOOKUP_URL_TEMPLATE = "https://api.zippopotam.us/us/{postal_code}"
 
 KEYWORD_SCHOLASTIC = (
@@ -92,6 +105,8 @@ KEYWORD_ADVANCED = (
 SOURCE_PRIORITY = {
     "official_chess": 100,
     "little_house_of_chess": 90,
+    "us_chess": 89,
+    "events4chess": 88,
     "chess_in_the_schools": 85,
     "chess_father": 80,
     "tri_state_chess": 72,
@@ -367,8 +382,10 @@ def build_session() -> requests.Session:
     session = requests.Session()
     session.headers.update(
         {
-            "User-Agent": USER_AGENT,
+            "User-Agent": BROWSER_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
+            "Upgrade-Insecure-Requests": "1",
         }
     )
     return session
@@ -390,7 +407,15 @@ def safe_parse_date(value: str | None, default_year: int | None = None) -> datet
         return None
     try:
         default = datetime(default_year or date.today().year, 1, 1)
-        return date_parser.parse(str(value), fuzzy=True, default=default).replace(tzinfo=None)
+        sanitized = re.sub(
+            r"\b(?:EDT|EST|CDT|CST|MDT|MST|PDT|PST|UTC|GMT)\b",
+            "",
+            str(value),
+            flags=re.IGNORECASE,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return date_parser.parse(sanitized, fuzzy=True, default=default).replace(tzinfo=None)
     except (ValueError, TypeError, OverflowError):
         return None
 
@@ -445,6 +470,90 @@ def canonicalize_url(value: str | None) -> str:
         return text
     path = parsed.path.rstrip("/") or "/"
     return urlunparse((parsed.scheme.lower(), parsed.netloc.lower(), path, "", parsed.query, ""))
+
+
+def is_social_or_platform_link(url: str) -> bool:
+    lower = canonicalize_url(url).lower()
+    return any(
+        token in lower
+        for token in (
+            "facebook.com",
+            "twitter.com",
+            "linkedin.com",
+            "youtube.com",
+            "instagram.com",
+            "maps.google.com",
+            "google.com/maps",
+            "calendar.google.com",
+            "mailto:",
+            "tel:",
+            "uscfsales.com",
+            "skvare.com/uscf",
+        )
+    )
+
+
+def first_external_link(urls: Iterable[str], *, excluded_domains: Iterable[str] = ()) -> str:
+    excluded = tuple(domain.lower() for domain in excluded_domains)
+    for url in urls:
+        canonical = canonicalize_url(url)
+        if not canonical or is_social_or_platform_link(canonical):
+            continue
+        lower = canonical.lower()
+        if any(domain in lower for domain in excluded):
+            continue
+        return canonical
+    return ""
+
+
+def parse_compact_utc_datetime(value: str) -> datetime | None:
+    text = clean_text(value)
+    if not text:
+        return None
+    for fmt in ("%Y%m%dT%H%M%SZ", "%Y%m%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def split_google_calendar_dates(url: str) -> tuple[datetime | None, datetime | None]:
+    query = parse_qs(urlparse(url).query)
+    value = clean_text((query.get("dates") or [""])[0])
+    if "/" not in value:
+        return (None, None)
+    start_text, end_text = value.split("/", 1)
+    return (parse_compact_utc_datetime(start_text), parse_compact_utc_datetime(end_text))
+
+
+def normalize_state_token(value: str) -> str:
+    text = clean_text(value).lower()
+    mapping = {
+        "new york": "NY",
+        "ny": "NY",
+        "new jersey": "NJ",
+        "nj": "NJ",
+        "connecticut": "CT",
+        "ct": "CT",
+        "pennsylvania": "PA",
+        "pa": "PA",
+        "massachusetts": "MA",
+        "ma": "MA",
+        "illinois": "IL",
+        "il": "IL",
+        "rhode island": "RI",
+        "ri": "RI",
+    }
+    return mapping.get(text, text.upper())
+
+
+def parse_city_state_label(value: str) -> tuple[str, str]:
+    text = clean_text(value)
+    match = re.search(r"([^,]+),\s*([A-Za-z ]+)$", text)
+    if not match:
+        return ("", "")
+    return (clean_text(match.group(1)), normalize_state_token(match.group(2)))
 
 
 def to_slug(value: str) -> str:
@@ -697,12 +806,352 @@ def collect_official_chess(session: requests.Session, months_ahead: int) -> list
 
 
 def collect_little_house_of_chess(session: requests.Session, months_ahead: int) -> list[Event]:
-    return collect_tribe_events(
-        session,
-        site_root=LITTLE_HOUSE_SITE_ROOT,
-        months_ahead=months_ahead,
-        parser=parse_little_house_event,
+    response = session.get(LITTLE_HOUSE_SOURCE_URL, timeout=30)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+    events: list[Event] = []
+
+    for article in soup.select(".mec-event-article"):
+        title_node = article.select_one(".mec-toggle-title")
+        title = clean_text(title_node.get_text(" ", strip=True) if title_node else "")
+        if not title:
+            continue
+
+        register_link = article.select_one(".mec-booking-button[href]")
+        organizer_website_link = article.select_one(".mec-organizer-url a[href]")
+        google_calendar_link = article.select_one(".mec-events-gcal[href]")
+        ical_link = article.select_one('a[href*="?method=ical"]')
+        location_box = article.select_one(".mec-single-event-location")
+        organizer_box = article.select_one(".mec-single-event-organizer")
+
+        venue_name = ""
+        address = ""
+        if location_box is not None:
+            venue_node = location_box.select_one(".author.fn.org")
+            address_node = location_box.select_one(".mec-address")
+            venue_name = clean_text(venue_node.get_text(" ", strip=True) if venue_node else "")
+            address = clean_text(address_node.get_text(" ", strip=True) if address_node else "")
+
+        city, state, postal_code = parse_city_state_postal(address)
+        if not city or not state:
+            city, state = parse_city_state_label(address)
+        organizer = ""
+        if organizer_box is not None:
+            organizer_node = organizer_box.select_one(".mec-organizer h6")
+            organizer = clean_text(organizer_node.get_text(" ", strip=True) if organizer_node else "")
+
+        start = None
+        end = None
+        if google_calendar_link is not None:
+            start, end = split_google_calendar_dates(clean_text(google_calendar_link.get("href")))
+
+        description = clean_text(
+            " ".join(
+                item.get_text(" ", strip=True)
+                for item in article.select(".mec-toggle-content, .mec-content-toggle")
+            )
+        )
+        summary = summarize_text(description or title)
+        category = clean_text(
+            " | ".join(
+                link.get_text(" ", strip=True)
+                for link in article.select(".mec-single-event-category a")
+            )
+        )
+        time_control = clean_text(
+            " ".join(
+                re.findall(r"(Game/\d+\s*,?\s*d\d+|G/\d+\s*,?\s*d\d+|Game/\d+|G/\d+)", description, flags=re.IGNORECASE)
+            )
+        )
+
+        registration_url = canonicalize_url(
+            (register_link or organizer_website_link or google_calendar_link or ical_link).get("href", "")
+            if (register_link or organizer_website_link or google_calendar_link or ical_link)
+            else ""
+        )
+        source_event_url = canonicalize_url(ical_link.get("href", "") if ical_link else "") or LITTLE_HOUSE_SOURCE_URL
+        source_updated_at = None
+        ical_url = clean_text(ical_link.get("href", "") if ical_link else "")
+        ical_match = re.search(r"[?&]id=(\d+)", ical_url)
+        if ical_match:
+            source_event_url = f"{LITTLE_HOUSE_SOURCE_URL}#mec-event-{ical_match.group(1)}"
+
+        event = Event(
+            provider="little_house_of_chess",
+            source="Little House of Chess",
+            title=title,
+            start=start,
+            end=end,
+            source_updated_at=source_updated_at,
+            event_url=source_event_url,
+            registration_url=registration_url,
+            source_url=LITTLE_HOUSE_SOURCE_URL,
+            venue_name=venue_name,
+            address=address,
+            city=city,
+            state=state,
+            postal_code=postal_code,
+            organizer=organizer,
+            summary=summary,
+            description=description,
+            sections=category,
+            time_control=time_control,
+        )
+        events.append(classify_event_fit(event))
+
+    return events
+
+
+def solve_sucuri_cookie_challenge(session: requests.Session, response_text: str) -> bool:
+    challenge_match = re.search(r"S='([^']+)'", response_text)
+    if challenge_match is None:
+        return False
+
+    decoded = base64_decode(challenge_match.group(1))
+    header_match = re.search(r"([A-Za-z])=(.*?);document\.cookie=", decoded)
+    if header_match is None:
+        return False
+
+    var_name, value_expr = header_match.groups()
+    cookie_value = evaluate_js_concat_expression(value_expr)
+    name_match = re.search(
+        r'document\.cookie=(.*?)\+\s*"="\s*\+\s*' + re.escape(var_name),
+        decoded,
     )
+    if name_match is None:
+        return False
+
+    cookie_name = evaluate_js_concat_expression(name_match.group(1))
+    session.cookies.set(cookie_name, cookie_value, domain="www.events4chess.com", path="/")
+    return True
+
+
+def base64_decode(value: str) -> str:
+    import base64
+
+    return base64.b64decode(value).decode("utf-8", "replace")
+
+
+def evaluate_js_concat_expression(expression: str) -> str:
+    python_expression = re.sub(
+        r"String\.fromCharCode\((\d+)\)",
+        lambda match: repr(chr(int(match.group(1)))),
+        expression,
+    )
+    python_expression = re.sub(r"'([^']*)'", lambda match: repr(match.group(1)), python_expression)
+    python_expression = re.sub(r'"([^"]*)"', lambda match: repr(match.group(1)), python_expression)
+    return str(eval(python_expression, {"__builtins__": {}}))
+
+
+def fetch_events4chess_html(session: requests.Session, url: str) -> str:
+    for _ in range(4):
+        response = session.get(url, timeout=30)
+        response.raise_for_status()
+        if "sucuri_cloudproxy_js" not in response.text:
+            return response.text
+        if not solve_sucuri_cookie_challenge(session, response.text):
+            break
+    raise RuntimeError("Events4Chess anti-bot challenge could not be solved")
+
+
+def parse_events4chess_card(card: BeautifulSoup) -> Event | None:
+    title_link = card.select_one("a.displayEventName[href]")
+    if title_link is None:
+        return None
+
+    title = clean_text(title_link.get_text(" ", strip=True))
+    if not title:
+        return None
+
+    detail_url = canonicalize_url(urljoin(EVENTS4CHESS_SOURCE_URL, title_link.get("href", "")))
+    register_link = card.select_one('a[href*="cat=1"]')
+    registration_url = canonicalize_url(
+        urljoin(EVENTS4CHESS_SOURCE_URL, (register_link or title_link).get("href", ""))
+    )
+
+    rows = card.select("#eventsTableEntry tr")
+    event_date = None
+    location_label = ""
+    for row in rows:
+        icon = clean_text(row.get_text(" ", strip=True))
+        cells = row.select("td")
+        if not cells:
+            continue
+        value = clean_text(cells[0].get_text(" ", strip=True))
+        if "Sunday" in value or "Monday" in value or "Tuesday" in value or "Wednesday" in value or "Thursday" in value or "Friday" in value or "Saturday" in value:
+            event_date = safe_parse_date(value)
+        elif "NY" in value or "NJ" in value or "CT" in value or "PA" in value:
+            location_label = value
+
+    venue_name = ""
+    city = ""
+    state = ""
+    if location_label:
+        venue_match = re.match(r"(.+?)\s*-\s*([^,]+,\s*[A-Za-z ]+)$", location_label)
+        if venue_match:
+            venue_name = clean_text(venue_match.group(1))
+            city, state = parse_city_state_label(venue_match.group(2))
+        else:
+            city, state = parse_city_state_label(location_label)
+
+    summary_node = card.select_one(".text-muted.small")
+    summary = clean_text(summary_node.get_text(" ", strip=True) if summary_node else "")
+    description = clean_text(
+        " ".join(value.get_text(" ", strip=True) for value in card.select(".text-muted.small, #eventsTableEntry"))
+    )
+
+    event = Event(
+        provider="events4chess",
+        source="Events4Chess",
+        title=title,
+        start=event_date,
+        event_url=detail_url,
+        registration_url=registration_url,
+        source_url=EVENTS4CHESS_SOURCE_URL,
+        venue_name=venue_name,
+        city=city,
+        state=state,
+        organizer="",
+        summary=summarize_text(summary or description or title),
+        description=description,
+        sections=summary,
+    )
+    return classify_event_fit(event)
+
+
+def collect_events4chess(session: requests.Session) -> list[Event]:
+    html = fetch_events4chess_html(session, EVENTS4CHESS_SOURCE_URL)
+    soup = BeautifulSoup(html, "html.parser")
+    events: list[Event] = []
+    for card in soup.select(".card"):
+        event = parse_events4chess_card(card)
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def parse_us_chess_detail(detail_url: str, session: requests.Session) -> dict[str, object]:
+    response = session.get(detail_url, timeout=30)
+    response.raise_for_status()
+    html_text = response.text
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    description_meta = soup.find("meta", attrs={"name": "description"})
+    description = clean_text(description_meta.get("content")) if description_meta else ""
+    updated_meta = soup.find("meta", attrs={"property": "og:updated_time"})
+    created_meta = soup.find("meta", attrs={"property": "article:published_time"})
+
+    address_match = re.search(
+        r'views-label-field-event-address.*?<span class="field-content"><p class="address"[^>]*>'
+        r'(.*?)</p>',
+        html_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    address_html = address_match.group(1) if address_match else ""
+    address_text = clean_text(BeautifulSoup(address_html, "html.parser").get_text(" ", strip=True))
+    city, state, postal_code = ("", "", "")
+    if address_text:
+        city, state, postal_code = parse_city_state_postal(address_text)
+        if not city or not state:
+            city, state = parse_city_state_label(address_text)
+
+    external_links = [
+        href
+        for href in (link.get("href") for link in soup.select("a[href]"))
+        if href and href.startswith("http")
+    ]
+    organizer_url = first_external_link(
+        external_links,
+        excluded_domains=("new.uschess.org", "uschess.org"),
+    )
+
+    return {
+        "description": description,
+        "address": address_text,
+        "city": city,
+        "state": state,
+        "postal_code": postal_code,
+        "registration_url": organizer_url or detail_url,
+        "source_updated_at": parse_iso_datetime(updated_meta.get("content")) if updated_meta else None,
+        "source_created_at": parse_iso_datetime(created_meta.get("content")) if created_meta else None,
+    }
+
+
+def collect_us_chess(session: requests.Session) -> list[Event]:
+    events: list[Event] = []
+    page = 0
+    seen_titles: set[str] = set()
+
+    while True:
+        page_url = f"{US_CHESS_SOURCE_URL}&page={page}"
+        response = session.get(page_url, timeout=30)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        rows = soup.select(".views-row")
+        if not rows:
+            break
+
+        for row in rows:
+            title_link = row.select_one(".title3 a[href]")
+            if title_link is None:
+                continue
+            title = clean_text(title_link.get_text(" ", strip=True))
+            if not title or title in seen_titles:
+                continue
+            seen_titles.add(title)
+
+            detail_url = canonicalize_url(urljoin("https://new.uschess.org", title_link.get("href", "")))
+            address_node = row.select_one(".address")
+            address_label = clean_text(address_node.get_text(" ", strip=True) if address_node else "")
+            city, state = parse_city_state_label(address_label)
+            organizer_node = row.select_one(".organizer-name")
+            organizer = clean_text(organizer_node.get_text(" ", strip=True) if organizer_node else "")
+            summary_node = row.select_one(".information")
+            summary = clean_text(summary_node.get_text(" ", strip=True) if summary_node else "")
+            time_value = row.select_one("time[datetime]")
+            start = None
+            if time_value is not None:
+                start = parse_iso_datetime(time_value.get("datetime"))
+            if start is None:
+                dates_node = row.select_one(".dates")
+                start = safe_parse_date(clean_text(dates_node.get_text(" ", strip=True) if dates_node else ""))
+
+            detail = parse_us_chess_detail(detail_url, session)
+            event = Event(
+                provider="us_chess",
+                source="US Chess",
+                title=title,
+                start=start,
+                source_created_at=detail["source_created_at"],
+                source_updated_at=detail["source_updated_at"],
+                event_url=detail_url,
+                registration_url=clean_text(str(detail["registration_url"])),
+                source_url=US_CHESS_SOURCE_URL,
+                address=clean_text(str(detail["address"])),
+                city=clean_text(str(detail["city"] or city)),
+                state=clean_text(str(detail["state"] or state)),
+                postal_code=clean_text(str(detail["postal_code"])),
+                organizer=organizer,
+                summary=summarize_text(summary or clean_text(str(detail["description"]))),
+                description=clean_text(str(detail["description"])),
+                entry_fee=extract_entry_fee(summary + " " + clean_text(str(detail["description"]))),
+                time_control=clean_text(
+                    " ".join(
+                        re.findall(
+                            r"(G/\d+\s*d\d+|G/\d+\s*d\d*|Game/\d+\s*d\d+|Game/\d+)",
+                            summary + " " + clean_text(str(detail["description"])),
+                            flags=re.IGNORECASE,
+                        )
+                    )
+                ),
+            )
+            events.append(classify_event_fit(event))
+
+        if not soup.select_one('a[href*="page=' + str(page + 1) + '"]'):
+            break
+        page += 1
+
+    return events
 
 
 def parse_westchester_schedule(session: requests.Session) -> list[Event]:
@@ -970,10 +1419,13 @@ def parse_chess_in_the_schools_tournaments(session: requests.Session) -> list[Ev
 
 
 def parse_city_state_postal(address: str) -> tuple[str, str, str]:
-    match = re.search(r"([^,]+),\s*([A-Z]{2})\s+(\d{5})(?:-\d{4})?$", address)
+    match = re.search(
+        r"([^,]+),\s*([A-Za-z ]+)\s+(\d{5})(?:-\d{4})?(?:\s+United States)?$",
+        clean_text(address),
+    )
     if not match:
         return ("", "", normalize_postal_code(address))
-    return (clean_text(match.group(1)), clean_text(match.group(2)), match.group(3))
+    return (clean_text(match.group(1)), normalize_state_token(match.group(2)), match.group(3))
 
 
 def extract_jsonld_events(payload: object) -> list[dict[str, object]]:
@@ -1079,10 +1531,9 @@ def collect_events(session: requests.Session, months_ahead: int = DEFAULT_MONTHS
 
     for label, collector in (
         ("Official Chess", lambda: collect_official_chess(session, months_ahead=months_ahead)),
-        (
-            "Little House of Chess",
-            lambda: collect_little_house_of_chess(session, months_ahead=months_ahead),
-        ),
+        ("Little House of Chess", lambda: collect_little_house_of_chess(session, months_ahead=months_ahead)),
+        ("US Chess", lambda: collect_us_chess(session)),
+        ("Events4Chess", lambda: collect_events4chess(session)),
         ("Chess In The Schools", lambda: parse_chess_in_the_schools_tournaments(session)),
         ("Chess Father", lambda: parse_chess_father_tournaments(session)),
         ("Tri-State Chess", lambda: parse_tristate_registration(session)),
