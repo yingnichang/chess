@@ -356,7 +356,7 @@ class CoordinateResolver:
     def _resolve_zip(self, postal_code: str) -> tuple[float, float] | None:
         cache_key = self._cache_key(f"zip:{postal_code}")
         cached = self.cache.get(cache_key)
-        if cached:
+        if cached and "lat" in cached and "lon" in cached:
             return (float(cached["lat"]), float(cached["lon"]))
 
         coords = self._resolve_zip_from_api(postal_code)
