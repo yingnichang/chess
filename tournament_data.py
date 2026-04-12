@@ -9,10 +9,11 @@ import re
 import warnings
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
+from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
@@ -35,6 +36,9 @@ BROWSER_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/135.0.0.0 Safari/537.36"
 )
+EASTERN_TZ = ZoneInfo("America/New_York")
+EASTERN_DATETIME_MIN = datetime.min.replace(tzinfo=EASTERN_TZ)
+EASTERN_DATETIME_MAX = datetime.max.replace(tzinfo=EASTERN_TZ)
 DEFAULT_MONTHS_AHEAD = 6
 TARGET_STATES = ("NY", "NJ", "CT")
 DEFAULT_CACHE_DIR = Path("data")
@@ -181,7 +185,7 @@ class Event:
 
     @property
     def updated_sort_value(self) -> datetime:
-        return self.source_updated_at or self.source_created_at or self.start or datetime.min
+        return self.source_updated_at or self.source_created_at or self.start or EASTERN_DATETIME_MIN
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -281,7 +285,7 @@ class TournamentDataset:
     @classmethod
     def from_record(cls, record: dict[str, object]) -> "TournamentDataset":
         return cls(
-            generated_at=parse_iso_datetime(record.get("generated_at")) or datetime.now(),
+            generated_at=parse_iso_datetime(record.get("generated_at")) or eastern_now(),
             stale=bool(record.get("stale", False)),
             refresh_error=str(record.get("refresh_error", "")),
             events=[Event.from_record(item) for item in record.get("events", []) or []],
@@ -485,6 +489,18 @@ def strip_html(value: str) -> str:
     return clean_text(BeautifulSoup(value or "", "html.parser").get_text(" ", strip=True))
 
 
+def eastern_now() -> datetime:
+    return datetime.now(EASTERN_TZ)
+
+
+def coerce_to_eastern(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=EASTERN_TZ)
+    return value.astimezone(EASTERN_TZ)
+
+
 def safe_parse_date(value: str | None, default_year: int | None = None) -> datetime | None:
     if not value:
         return None
@@ -498,7 +514,7 @@ def safe_parse_date(value: str | None, default_year: int | None = None) -> datet
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            return date_parser.parse(sanitized, fuzzy=True, default=default).replace(tzinfo=None)
+            return coerce_to_eastern(date_parser.parse(sanitized, fuzzy=True, default=default))
     except (ValueError, TypeError, OverflowError):
         return None
 
@@ -508,7 +524,7 @@ def parse_iso_datetime(value: object) -> datetime | None:
         return None
     try:
         text = str(value).replace("Z", "+00:00")
-        return datetime.fromisoformat(text).replace(tzinfo=None)
+        return coerce_to_eastern(datetime.fromisoformat(text))
     except ValueError:
         return safe_parse_date(str(value))
 
@@ -596,11 +612,12 @@ def parse_compact_utc_datetime(value: str) -> datetime | None:
     text = clean_text(value)
     if not text:
         return None
-    for fmt in ("%Y%m%dT%H%M%SZ", "%Y%m%d"):
-        try:
-            return datetime.strptime(text, fmt)
-        except ValueError:
-            continue
+    try:
+        if text.endswith("Z"):
+            return datetime.strptime(text, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc).astimezone(EASTERN_TZ)
+        return datetime.strptime(text, "%Y%m%d").replace(tzinfo=EASTERN_TZ)
+    except ValueError:
+        pass
     return None
 
 
@@ -2104,7 +2121,7 @@ def sort_events(events: Iterable[Event], mode: str = "recently_updated") -> list
         items.sort(
             key=lambda event: (
                 event.estimated_drive_minutes if event.estimated_drive_minutes is not None else 999999,
-                event.start or datetime.max,
+                event.start or EASTERN_DATETIME_MAX,
                 event.title.lower(),
             )
         )
@@ -2113,8 +2130,10 @@ def sort_events(events: Iterable[Event], mode: str = "recently_updated") -> list
     if mode == "date":
         items.sort(
             key=lambda event: (
-                event.start or datetime.max,
-                -event.updated_sort_value.timestamp() if event.updated_sort_value != datetime.min else 0,
+                event.start or EASTERN_DATETIME_MAX,
+                -event.updated_sort_value.timestamp()
+                if event.updated_sort_value != EASTERN_DATETIME_MIN
+                else 0,
                 event.title.lower(),
             )
         )
@@ -2122,8 +2141,8 @@ def sort_events(events: Iterable[Event], mode: str = "recently_updated") -> list
 
     items.sort(
         key=lambda event: (
-            -(event.updated_sort_value.timestamp() if event.updated_sort_value != datetime.min else 0),
-            event.start or datetime.max,
+            -(event.updated_sort_value.timestamp() if event.updated_sort_value != EASTERN_DATETIME_MIN else 0),
+            event.start or EASTERN_DATETIME_MAX,
             event.title.lower(),
         )
     )
@@ -2143,7 +2162,7 @@ def refresh_dataset(
     normalized = normalize_event_locations(deduped, resolver)
     geocoded = annotate_event_coordinates(normalized, resolver)
     dataset = TournamentDataset(
-        generated_at=datetime.now(),
+        generated_at=eastern_now(),
         events=sort_events(geocoded, mode="recently_updated"),
     )
     cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -2170,7 +2189,7 @@ def load_or_refresh_dataset(
 ) -> tuple[TournamentDataset, bool]:
     cached = load_cached_dataset(cache_file)
     if not force_refresh and cached is not None:
-        cache_age = datetime.now() - cached.generated_at
+        cache_age = eastern_now() - cached.generated_at
         if cache_age <= timedelta(hours=max_age_hours):
             return cached, False
 
@@ -2274,7 +2293,7 @@ def write_html_report(
     home_label: str = "",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    generated_text = (generated_at or datetime.now()).strftime("%Y-%m-%d %H:%M")
+    generated_text = format_datetime(generated_at or eastern_now(), human=True)
     cards: list[str] = []
     for event in events:
         drive_text = "Distance unavailable"
@@ -2411,20 +2430,26 @@ def write_html_report(
 def format_datetime(value: datetime | None, *, human: bool = False) -> str:
     if value is None:
         return ""
+    eastern_value = coerce_to_eastern(value)
+    if eastern_value is None:
+        return ""
     if human:
-        return value.strftime("%a %b %d, %Y %I:%M %p")
-    return value.strftime("%Y-%m-%d %H:%M")
+        return eastern_value.strftime("%a %b %d, %Y %I:%M %p %Z")
+    return eastern_value.strftime("%Y-%m-%d %H:%M %Z")
 
 
 def relative_date_label(value: datetime | None) -> str:
     if value is None:
         return "time unavailable"
-    today = date.today()
-    delta_days = (today - value.date()).days
+    eastern_value = coerce_to_eastern(value)
+    if eastern_value is None:
+        return "time unavailable"
+    today = eastern_now().date()
+    delta_days = (today - eastern_value.date()).days
     if delta_days == 0:
         return "today"
     if delta_days == 1:
         return "1 day ago"
     if delta_days > 1:
         return f"{delta_days} days ago"
-    return value.strftime("%Y-%m-%d")
+    return eastern_value.strftime("%Y-%m-%d")

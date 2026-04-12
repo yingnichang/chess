@@ -1,4 +1,5 @@
 window.__eventsForCities = [];
+const DISPLAY_TIME_ZONE = "America/New_York";
 
 void init();
 
@@ -713,9 +714,16 @@ function cityOptionsFromUi(statesSelect) {
 }
 
 function toIsoDate(value) {
-  return new Date(value.getTime() - value.getTimezoneOffset() * 60000)
-    .toISOString()
-    .slice(0, 10);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: DISPLAY_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(value);
+  const lookup = Object.fromEntries(
+    parts.filter((part) => part.type !== "literal").map((part) => [part.type, part.value])
+  );
+  return `${lookup.year}-${lookup.month}-${lookup.day}`;
 }
 
 function formatDateTime(value, verbose) {
@@ -731,6 +739,8 @@ function formatDateTime(value, verbose) {
         year: "numeric",
         hour: "2-digit",
         minute: "2-digit",
+        timeZone: DISPLAY_TIME_ZONE,
+        timeZoneName: "short",
       }
     : {
         year: "numeric",
@@ -738,6 +748,8 @@ function formatDateTime(value, verbose) {
         day: "2-digit",
         hour: "2-digit",
         minute: "2-digit",
+        timeZone: DISPLAY_TIME_ZONE,
+        timeZoneName: "short",
       };
 
   return new Intl.DateTimeFormat("en-US", options).format(value);
@@ -748,15 +760,16 @@ function relativeDateLabel(value) {
     return "time unavailable";
   }
 
-  const today = new Date();
-  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const startOfValue = new Date(value.getFullYear(), value.getMonth(), value.getDate());
-  const deltaDays = Math.round((startOfToday - startOfValue) / 86400000);
+  const todayIso = toIsoDate(new Date());
+  const valueIso = toIsoDate(value);
+  const deltaDays = Math.round(
+    (Date.parse(`${todayIso}T00:00:00Z`) - Date.parse(`${valueIso}T00:00:00Z`)) / 86400000
+  );
 
   if (deltaDays === 0) return "today";
   if (deltaDays === 1) return "1 day ago";
   if (deltaDays > 1) return `${deltaDays} days ago`;
-  return value.toISOString().slice(0, 10);
+  return valueIso;
 }
 
 function driveLabel(event) {
