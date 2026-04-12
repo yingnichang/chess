@@ -9,8 +9,8 @@ import re
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Iterable
-from urllib.parse import urlencode, urlparse, urlunparse
+from typing import Callable, Iterable
+from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -35,7 +35,14 @@ DEFAULT_CACHE_FILE = DEFAULT_CACHE_DIR / "tournaments_cache.json"
 DEFAULT_COORD_CACHE_FILE = DEFAULT_CACHE_DIR / "coordinate_cache.json"
 DEFAULT_OUTPUT_DIR = Path("output")
 OFFICIAL_CHESS_SOURCE_URL = "https://officialchess.org/events/list/"
+OFFICIAL_CHESS_SITE_ROOT = "https://officialchess.org"
+LITTLE_HOUSE_SOURCE_URL = "https://littlehouseofchess.org/calendar/"
+LITTLE_HOUSE_SITE_ROOT = "https://littlehouseofchess.org"
 WESTCHESTER_SOURCE_URL = "https://www.westchesterchessclub.com/schedule"
+TRI_STATE_SOURCE_URL = "https://tristatechess.com/onlineregistration/"
+ICA_NJ_SOURCE_URL = "https://www.icanj.net/p.php?p=2122&Tournaments%20Calendar="
+CHESS_IN_THE_SCHOOLS_SOURCE_URL = "https://chessintheschools.org/tournament/"
+CHESS_FATHER_SOURCE_URL = "https://www.chessfather.com/tournaments"
 ZIP_LOOKUP_URL_TEMPLATE = "https://api.zippopotam.us/us/{postal_code}"
 
 KEYWORD_SCHOLASTIC = (
@@ -84,6 +91,11 @@ KEYWORD_ADVANCED = (
 
 SOURCE_PRIORITY = {
     "official_chess": 100,
+    "little_house_of_chess": 90,
+    "chess_in_the_schools": 85,
+    "chess_father": 80,
+    "tri_state_chess": 72,
+    "ica_nj": 68,
     "westchester_chess_club": 60,
 }
 
@@ -439,6 +451,14 @@ def to_slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", clean_text(value).lower()).strip("-")
 
 
+def normalized_title_for_dedupe(value: str) -> str:
+    text = clean_text(value).lower()
+    text = re.sub(r"\b(entries?|register(?: now)?|registration)\b", "", text)
+    text = re.sub(r"\s+[–-]\s+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return to_slug(text)
+
+
 def compose_full_address(event: Event) -> str:
     return ", ".join(
         part
@@ -572,7 +592,13 @@ def classify_event_fit(event: Event) -> Event:
     return event
 
 
-def parse_official_chess_event(item: dict[str, object]) -> Event:
+def parse_tribe_event(
+    item: dict[str, object],
+    *,
+    provider: str,
+    source: str,
+    source_url: str,
+) -> Event:
     description_html = str(item.get("description", "") or "")
     description_text = strip_html(description_html)
     venue = item.get("venue") or {}
@@ -580,8 +606,8 @@ def parse_official_chess_event(item: dict[str, object]) -> Event:
     fields = custom_field_map(item.get("custom_fields"))
 
     event = Event(
-        provider="official_chess",
-        source="Official Chess",
+        provider=provider,
+        source=source,
         title=clean_text(item.get("title")),
         start=parse_iso_datetime(item.get("start_date")),
         end=parse_iso_datetime(item.get("end_date")),
@@ -595,7 +621,7 @@ def parse_official_chess_event(item: dict[str, object]) -> Event:
                 description_html=description_html,
             )
         ),
-        source_url=OFFICIAL_CHESS_SOURCE_URL,
+        source_url=source_url,
         venue_name=clean_text(venue.get("venue")),
         address=clean_text(venue.get("address")),
         city=clean_text(venue.get("city")),
@@ -614,7 +640,31 @@ def parse_official_chess_event(item: dict[str, object]) -> Event:
     return classify_event_fit(event)
 
 
-def collect_official_chess(session: requests.Session, months_ahead: int) -> list[Event]:
+def parse_official_chess_event(item: dict[str, object]) -> Event:
+    return parse_tribe_event(
+        item,
+        provider="official_chess",
+        source="Official Chess",
+        source_url=OFFICIAL_CHESS_SOURCE_URL,
+    )
+
+
+def parse_little_house_event(item: dict[str, object]) -> Event:
+    return parse_tribe_event(
+        item,
+        provider="little_house_of_chess",
+        source="Little House of Chess",
+        source_url=LITTLE_HOUSE_SOURCE_URL,
+    )
+
+
+def collect_tribe_events(
+    session: requests.Session,
+    *,
+    site_root: str,
+    months_ahead: int,
+    parser: Callable[[dict[str, object]], Event],
+) -> list[Event]:
     events: list[Event] = []
     start_day = date.today()
     end_day = start_day + timedelta(days=31 * months_ahead)
@@ -624,20 +674,35 @@ def collect_official_chess(session: requests.Session, months_ahead: int) -> list
         "per_page": "100",
         "page": "1",
     }
-    api_url = (
-        "https://officialchess.org/wp-json/tribe/events/v1/events?"
-        + urlencode(params)
-    )
+    api_url = f"{site_root}/wp-json/tribe/events/v1/events?" + urlencode(params)
 
     while api_url:
         response = session.get(api_url, timeout=30)
         response.raise_for_status()
         payload = response.json()
         for item in payload.get("events", []):
-            events.append(parse_official_chess_event(item))
+            events.append(parser(item))
         api_url = payload.get("next_rest_url") or ""
 
     return events
+
+
+def collect_official_chess(session: requests.Session, months_ahead: int) -> list[Event]:
+    return collect_tribe_events(
+        session,
+        site_root=OFFICIAL_CHESS_SITE_ROOT,
+        months_ahead=months_ahead,
+        parser=parse_official_chess_event,
+    )
+
+
+def collect_little_house_of_chess(session: requests.Session, months_ahead: int) -> list[Event]:
+    return collect_tribe_events(
+        session,
+        site_root=LITTLE_HOUSE_SITE_ROOT,
+        months_ahead=months_ahead,
+        parser=parse_little_house_event,
+    )
 
 
 def parse_westchester_schedule(session: requests.Session) -> list[Event]:
@@ -681,12 +746,347 @@ def parse_westchester_schedule(session: requests.Session) -> list[Event]:
     return events
 
 
+def find_registration_url_from_text(text: str) -> str:
+    match = re.search(r"https?://[^\s\"'<>]+", text or "")
+    return canonicalize_url(match.group(0)) if match else ""
+
+
+def parse_tristate_registration(session: requests.Session) -> list[Event]:
+    response = session.get(TRI_STATE_SOURCE_URL, timeout=25)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+    events: list[Event] = []
+
+    for link in soup.select("a[href]"):
+        title = clean_text(link.get_text(" ", strip=True))
+        href = canonicalize_url(urljoin(TRI_STATE_SOURCE_URL, link.get("href", "")))
+        if not title or len(title) < 6:
+            continue
+        if "register" not in title.lower() and "chess" not in title.lower():
+            continue
+
+        date_match = re.search(
+            r"((jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:,\s*\d{4})?)",
+            title,
+            flags=re.IGNORECASE,
+        )
+        start = (
+            safe_parse_date(date_match.group(1), default_year=date.today().year)
+            if date_match
+            else None
+        )
+        event = Event(
+            provider="tri_state_chess",
+            source="Tri-State Chess",
+            title=title,
+            start=start,
+            event_url=href,
+            registration_url=href,
+            source_url=TRI_STATE_SOURCE_URL,
+            summary="Scraped from Tri-State Chess online registration page.",
+            description=title,
+            organizer="Tri-State Chess",
+        )
+        events.append(classify_event_fit(event))
+
+    return events
+
+
+def parse_icanj_calendar(session: requests.Session) -> list[Event]:
+    response = session.get(ICA_NJ_SOURCE_URL, timeout=25)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+    current_year = date.today().year
+    events: list[Event] = []
+
+    for link in soup.select("a[href]"):
+        title = clean_text(link.get_text(" ", strip=True))
+        href = canonicalize_url(urljoin(ICA_NJ_SOURCE_URL, link.get("href", "")))
+        if not title:
+            continue
+        if (
+            "tournament" not in title.lower()
+            and "quad" not in title.lower()
+            and "championship" not in title.lower()
+        ):
+            continue
+        if "calendar" in title.lower():
+            continue
+
+        date_match = re.search(
+            r"((jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:[-/]\d{1,2})?(?:,\s*\d{4})?)",
+            title,
+            flags=re.IGNORECASE,
+        )
+        start = (
+            safe_parse_date(date_match.group(1), default_year=current_year)
+            if date_match
+            else None
+        )
+        event = Event(
+            provider="ica_nj",
+            source="ICA NJ",
+            title=title,
+            start=start,
+            event_url=href,
+            registration_url=href,
+            source_url=ICA_NJ_SOURCE_URL,
+            summary="Scraped from the ICA NJ tournament calendar.",
+            description=title,
+            organizer="ICA NJ",
+        )
+        events.append(classify_event_fit(event))
+
+    return events
+
+
+def parse_chess_in_the_schools_detail(
+    session: requests.Session,
+    event_url: str,
+    title: str,
+    start: datetime | None,
+    location_label: str,
+) -> Event:
+    response = session.get(event_url, timeout=25)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+    body_text = clean_text(soup.get_text("\n", strip=True))
+
+    register_link = ""
+    for link in soup.select("a[href]"):
+        href = clean_text(link.get("href"))
+        label = clean_text(link.get_text(" ", strip=True))
+        if "register" in label.lower():
+            register_link = canonicalize_url(urljoin(event_url, href))
+            break
+
+    location_heading = soup.find(["h3", "h4"], string=re.compile(r"^\s*PS |School|MS |IS |ERHS", re.IGNORECASE))
+    venue_name = clean_text(location_heading.get_text(" ", strip=True)) if location_heading else ""
+
+    address_match = re.search(
+        r"(\d{1,5}[^,\n]+,\s*(?:NY|New York),?\s*NY(?:\s+\d{5})?)",
+        body_text,
+        flags=re.IGNORECASE,
+    )
+    address = clean_text(address_match.group(1)) if address_match else clean_text(location_label)
+    city = "New York" if "new york" in address.lower() or "ny, ny" in address.lower() else ""
+    postal_code = normalize_postal_code(address)
+
+    event = Event(
+        provider="chess_in_the_schools",
+        source="Chess In The Schools",
+        title=title,
+        start=start,
+        event_url=canonicalize_url(event_url),
+        registration_url=register_link or canonicalize_url(event_url),
+        source_url=CHESS_IN_THE_SCHOOLS_SOURCE_URL,
+        venue_name=venue_name,
+        address=address,
+        city=city,
+        state="NY",
+        postal_code=postal_code,
+        organizer="Chess In The Schools",
+        summary=summarize_text(body_text),
+        description=body_text,
+        sections=clean_text(
+            " | ".join(re.findall(r"(K-[^\.]+|JH-HS[^\.]+|EL[^\.]+|Primary[^\.]+)", body_text))
+        ),
+        time_control=clean_text(
+            " ".join(re.findall(r"(G/\d+\s*(?:or\s*G/\d+)?[^\.]*Delay)", body_text, flags=re.IGNORECASE))
+        ),
+    )
+    return classify_event_fit(event)
+
+
+def parse_chess_in_the_schools_tournaments(session: requests.Session) -> list[Event]:
+    response = session.get(CHESS_IN_THE_SCHOOLS_SOURCE_URL, timeout=25)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+    events: list[Event] = []
+
+    for link in soup.select("a[href]"):
+        label = clean_text(link.get_text(" ", strip=True))
+        href = canonicalize_url(urljoin(CHESS_IN_THE_SCHOOLS_SOURCE_URL, link.get("href", "")))
+        if label != "Tournament Details":
+            continue
+
+        card_heading = link.find_previous(["h2", "h3"])
+        if card_heading is None:
+            continue
+        title = clean_text(card_heading.get_text(" ", strip=True))
+        if not title or title.lower() == "all tournaments":
+            continue
+
+        card_text_parts: list[str] = []
+        cursor = card_heading.find_next_sibling()
+        while cursor is not None and cursor.name != card_heading.name:
+            if hasattr(cursor, "find") and cursor.find(
+                "a", string=re.compile("Tournament Details", re.IGNORECASE)
+            ):
+                break
+            if hasattr(cursor, "get_text"):
+                card_text_parts.append(clean_text(cursor.get_text(" ", strip=True)))
+            else:
+                card_text_parts.append(clean_text(str(cursor)))
+            cursor = cursor.find_next_sibling()
+        card_text = " ".join(part for part in card_text_parts if part)
+
+        date_match = re.search(
+            r"(Saturday|Sunday|Monday|Tuesday|Wednesday|Thursday|Friday),\s+[A-Za-z]+\s+\d{1,2},\s+\d{4}",
+            card_text,
+        )
+        start = safe_parse_date(date_match.group(0)) if date_match else None
+        location_match = re.search(r"(PS|MS|IS|ERHS)\s+[^\s]+", card_text)
+        location_label = location_match.group(0) if location_match else ""
+
+        try:
+            events.append(
+                parse_chess_in_the_schools_detail(
+                    session,
+                    event_url=href,
+                    title=title,
+                    start=start,
+                    location_label=location_label,
+                )
+            )
+        except Exception:
+            fallback = Event(
+                provider="chess_in_the_schools",
+                source="Chess In The Schools",
+                title=title,
+                start=start,
+                event_url=href,
+                registration_url=href,
+                source_url=CHESS_IN_THE_SCHOOLS_SOURCE_URL,
+                venue_name=location_label,
+                state="NY",
+                organizer="Chess In The Schools",
+                summary=summarize_text(card_text),
+                description=card_text,
+            )
+            events.append(classify_event_fit(fallback))
+
+    return events
+
+
+def parse_city_state_postal(address: str) -> tuple[str, str, str]:
+    match = re.search(r"([^,]+),\s*([A-Z]{2})\s+(\d{5})(?:-\d{4})?$", address)
+    if not match:
+        return ("", "", normalize_postal_code(address))
+    return (clean_text(match.group(1)), clean_text(match.group(2)), match.group(3))
+
+
+def extract_jsonld_events(payload: object) -> list[dict[str, object]]:
+    if isinstance(payload, dict):
+        if payload.get("@type") == "Event":
+            return [payload]
+        if "@graph" in payload and isinstance(payload["@graph"], list):
+            events: list[dict[str, object]] = []
+            for item in payload["@graph"]:
+                events.extend(extract_jsonld_events(item))
+            return events
+    if isinstance(payload, list):
+        events: list[dict[str, object]] = []
+        for item in payload:
+            events.extend(extract_jsonld_events(item))
+        return events
+    return []
+
+
+def parse_chess_father_event(session: requests.Session, event_url: str) -> Event | None:
+    response = session.get(event_url, timeout=25)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    jsonld_events: list[dict[str, object]] = []
+    for script in soup.find_all("script", {"type": "application/ld+json"}):
+        try:
+            payload = json.loads(script.get_text(strip=True))
+        except json.JSONDecodeError:
+            continue
+        jsonld_events.extend(extract_jsonld_events(payload))
+
+    if not jsonld_events:
+        return None
+
+    event_data = jsonld_events[0]
+    location = event_data.get("location") or {}
+    address_text = clean_text(location.get("address")) if isinstance(location, dict) else ""
+    city, state, postal_code = parse_city_state_postal(address_text)
+    offers = event_data.get("offers") or {}
+    entry_fee = ""
+    if isinstance(offers, dict):
+        low_price = clean_text(offers.get("lowPrice"))
+        high_price = clean_text(offers.get("highPrice"))
+        if low_price and high_price and low_price != high_price:
+            entry_fee = f"${low_price}-${high_price}"
+        elif low_price:
+            entry_fee = f"${low_price}"
+
+    event = Event(
+        provider="chess_father",
+        source="Chess Father",
+        title=clean_text(event_data.get("name")),
+        start=parse_iso_datetime(event_data.get("startDate")),
+        end=parse_iso_datetime(event_data.get("endDate")),
+        event_url=canonicalize_url(event_url),
+        registration_url=canonicalize_url(event_url),
+        source_url=CHESS_FATHER_SOURCE_URL,
+        venue_name=clean_text(location.get("name")) if isinstance(location, dict) else "",
+        address=address_text,
+        city=city,
+        state=state,
+        postal_code=postal_code,
+        organizer="Chess Father",
+        summary=summarize_text(clean_text(event_data.get("description"))),
+        description=clean_text(event_data.get("description")),
+        entry_fee=entry_fee,
+        time_control=clean_text(
+            " ".join(
+                re.findall(r"(G/\d+\s*;?\s*d/?\d+|G/\d+\s*d\d+)", clean_text(event_data.get("description")), flags=re.IGNORECASE)
+            )
+        ),
+    )
+    return classify_event_fit(event)
+
+
+def parse_chess_father_tournaments(session: requests.Session) -> list[Event]:
+    response = session.get(CHESS_FATHER_SOURCE_URL, timeout=25)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+    event_urls = sorted(
+        {
+            canonicalize_url(urljoin(CHESS_FATHER_SOURCE_URL, link.get("href", "")))
+            for link in soup.select('a[href*="/event-details/"]')
+            if link.get("href")
+        }
+    )
+
+    events: list[Event] = []
+    for event_url in event_urls:
+        try:
+            event = parse_chess_father_event(session, event_url)
+        except Exception:
+            continue
+        if event is not None:
+            events.append(event)
+    return events
+
+
 def collect_events(session: requests.Session, months_ahead: int = DEFAULT_MONTHS_AHEAD) -> list[Event]:
     collected: list[Event] = []
     errors: list[str] = []
 
     for label, collector in (
         ("Official Chess", lambda: collect_official_chess(session, months_ahead=months_ahead)),
+        (
+            "Little House of Chess",
+            lambda: collect_little_house_of_chess(session, months_ahead=months_ahead),
+        ),
+        ("Chess In The Schools", lambda: parse_chess_in_the_schools_tournaments(session)),
+        ("Chess Father", lambda: parse_chess_father_tournaments(session)),
+        ("Tri-State Chess", lambda: parse_tristate_registration(session)),
+        ("ICA NJ", lambda: parse_icanj_calendar(session)),
         ("Westchester Chess Club", lambda: parse_westchester_schedule(session)),
     ):
         try:
@@ -699,7 +1099,7 @@ def collect_events(session: requests.Session, months_ahead: int = DEFAULT_MONTHS
     return collected
 
 
-def build_dedupe_key(event: Event) -> str:
+def build_url_dedupe_key(event: Event) -> str:
     event_day = event.start.date().isoformat() if event.start else ""
     canonical_registration = canonicalize_url(event.registration_url)
     if canonical_registration:
@@ -707,12 +1107,18 @@ def build_dedupe_key(event: Event) -> str:
     canonical_event_url = canonicalize_url(event.event_url)
     if canonical_event_url:
         return f"event|{canonical_event_url}|{event_day}"
+    return ""
+
+
+def build_dedupe_key(event: Event) -> str:
+    event_day = event.start.date().isoformat() if event.start else ""
     return "|".join(
         [
-            to_slug(event.title),
+            "semantic",
+            normalized_title_for_dedupe(event.title),
             event_day,
             normalize_postal_code(event.postal_code) or to_slug(event.city),
-            to_slug(event.venue_name or event.address),
+            to_slug(event.venue_name or event.address or event.organizer),
         ]
     )
 
@@ -790,16 +1196,24 @@ def merge_events(primary: Event, secondary: Event) -> Event:
     return merged
 
 
-def dedupe_events(events: Iterable[Event]) -> list[Event]:
+def dedupe_by_key(events: Iterable[Event], key_builder: Callable[[Event], str]) -> list[Event]:
     best_by_key: dict[str, Event] = {}
     for event in events:
-        event.dedupe_key = build_dedupe_key(event)
-        existing = best_by_key.get(event.dedupe_key)
+        key = key_builder(event)
+        if not key:
+            key = f"fallback|{id(event)}"
+        event.dedupe_key = key
+        existing = best_by_key.get(key)
         if existing is None:
-            best_by_key[event.dedupe_key] = event
+            best_by_key[key] = event
             continue
-        best_by_key[event.dedupe_key] = merge_events(existing, event)
+        best_by_key[key] = merge_events(existing, event)
     return list(best_by_key.values())
+
+
+def dedupe_events(events: Iterable[Event]) -> list[Event]:
+    deduped_by_url = dedupe_by_key(events, build_url_dedupe_key)
+    return dedupe_by_key(deduped_by_url, build_dedupe_key)
 
 
 def annotate_event_coordinates(events: Iterable[Event], resolver: CoordinateResolver) -> list[Event]:
