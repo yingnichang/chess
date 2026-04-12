@@ -96,8 +96,8 @@
           <label class="field">
             <span>Sort by</span>
             <select id="sort-mode" name="sortMode">
-              <option value="recently_updated">Recently updated</option>
               <option value="date">Tournament date</option>
+              <option value="recently_updated">Recently updated</option>
               <option value="closest">Closest to home</option>
             </select>
           </label>
@@ -115,7 +115,7 @@
         <section class="toolbar panel">
           <div>
             <strong id="results-count">0</strong> tournaments match the current filters.
-            <p class="muted">Default order favors source freshness, so newly updated tournament listings rise to the top.</p>
+            <p class="muted">Default order starts with the soonest tournament dates, with freshness used as a secondary tie-breaker.</p>
           </div>
           <div class="toolbar-links">
             <a href="data/tournaments.csv">Download CSV</a>

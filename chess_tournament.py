@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-drive-minutes", type=int, default=120)
     parser.add_argument("--states", default=",".join(TARGET_STATES))
     parser.add_argument("--search", default="")
-    parser.add_argument("--sort", choices=("recently_updated", "date", "closest"), default="recently_updated")
+    parser.add_argument("--sort", choices=("recently_updated", "date", "closest"), default="date")
     parser.add_argument("--scholastic-only", action="store_true")
     parser.add_argument("--beginner-friendly", action="store_true")
     return parser.parse_args()

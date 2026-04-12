@@ -192,7 +192,7 @@ function buildDefaults(events) {
     sources: uniqueSourceValues(events),
     scholasticOnly: true,
     beginnerFriendly: false,
-    sortMode: "recently_updated",
+    sortMode: "date",
     cardLimit: "20",
   };
 }
