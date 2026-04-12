@@ -204,16 +204,15 @@ select[multiple] {
   white-space: nowrap;
 }
 
-.primary {
-  background-color: var(--accent);
-  background-image: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+.button-row button.primary {
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
   color: #ffffff;
   -webkit-text-fill-color: #ffffff;
   border: 1px solid transparent;
 }
 
-.secondary {
-  background-color: white;
+.button-row button.secondary {
+  background: white;
   color: var(--accent);
   -webkit-text-fill-color: var(--accent);
 }
