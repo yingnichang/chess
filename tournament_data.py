@@ -374,6 +374,40 @@ class CoordinateResolver:
         save_json_file(self.cache_path, self.cache)
         return coords
 
+    def resolve_zip_place(self, postal_code: str) -> tuple[str, str] | None:
+        postal_code = normalize_postal_code(postal_code)
+        if not postal_code:
+            return None
+
+        cache_key = self._cache_key(f"zip:{postal_code}")
+        cached = self.cache.get(cache_key) or {}
+        cached_city = clean_text(cached.get("city"))
+        cached_state = normalize_state_token(cached.get("state")) if cached.get("state") else ""
+        if cached_city or cached_state:
+            return (cached_city, cached_state)
+
+        place = self._resolve_zip_place_from_api(postal_code)
+        if place is None and self.zip_resolver is not None:
+            record = self.zip_resolver.query_postal_code(postal_code)
+            place_name = clean_text(getattr(record, "place_name", None))
+            state_code = normalize_state_token(
+                getattr(record, "state_code", None) or getattr(record, "state_name", None) or ""
+            )
+            if place_name or state_code:
+                place = (place_name, state_code)
+
+        if place is None:
+            return None
+
+        cached["query"] = postal_code
+        if place[0]:
+            cached["city"] = place[0]
+        if place[1]:
+            cached["state"] = place[1]
+        self.cache[cache_key] = cached
+        save_json_file(self.cache_path, self.cache)
+        return place
+
     @staticmethod
     def _cache_key(query: str) -> str:
         return hashlib.sha1(query.lower().encode("utf-8")).hexdigest()
@@ -400,6 +434,31 @@ class CoordinateResolver:
         if latitude is None or longitude is None:
             return None
         return (latitude, longitude)
+
+    def _resolve_zip_place_from_api(self, postal_code: str) -> tuple[str, str] | None:
+        try:
+            response = requests.get(
+                ZIP_LOOKUP_URL_TEMPLATE.format(postal_code=postal_code),
+                headers={"User-Agent": USER_AGENT},
+                timeout=12,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            return None
+
+        places = payload.get("places") or []
+        if not places:
+            return None
+
+        first_place = places[0]
+        city = clean_text(first_place.get("place name") or first_place.get("place_name"))
+        state = normalize_state_token(
+            first_place.get("state abbreviation") or first_place.get("state") or ""
+        )
+        if not city and not state:
+            return None
+        return (city, state)
 
 
 def build_session() -> requests.Session:
@@ -1635,13 +1694,16 @@ def parse_chess_in_the_schools_tournaments(session: requests.Session) -> list[Ev
 
 
 def parse_city_state_postal(address: str) -> tuple[str, str, str]:
-    match = re.search(
+    text = clean_text(address)
+    patterns = (
         r"([^,]+),\s*([A-Za-z ]+)\s+(\d{5})(?:-\d{4})?(?:\s+United States)?$",
-        clean_text(address),
+        r"(?:.*\b)?([A-Za-z][A-Za-z .'-]+?)\s+([A-Z]{2})\s+(\d{5})(?:-\d{4})?(?:\s+United States)?$",
     )
-    if not match:
-        return ("", "", normalize_postal_code(address))
-    return (clean_text(match.group(1)), normalize_state_token(match.group(2)), match.group(3))
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return (clean_text(match.group(1)), normalize_state_token(match.group(2)), match.group(3))
+    return ("", "", normalize_postal_code(text))
 
 
 def extract_jsonld_events(payload: object) -> list[dict[str, object]]:
@@ -1914,6 +1976,38 @@ def annotate_event_coordinates(events: Iterable[Event], resolver: CoordinateReso
     return annotated
 
 
+def normalize_event_locations(events: Iterable[Event], resolver: CoordinateResolver) -> list[Event]:
+    normalized: list[Event] = []
+    for event in events:
+        event_copy = replace(event)
+        address_blob = clean_text(
+            " ".join(
+                part
+                for part in [event_copy.address, event_copy.city, event_copy.state, event_copy.postal_code]
+                if part
+            )
+        )
+        parsed_city, parsed_state, parsed_postal = parse_city_state_postal(address_blob)
+        if not event_copy.city and parsed_city:
+            event_copy.city = parsed_city
+        if not event_copy.state and parsed_state:
+            event_copy.state = parsed_state
+        if not event_copy.postal_code and parsed_postal:
+            event_copy.postal_code = parsed_postal
+
+        if event_copy.postal_code and (not event_copy.city or not event_copy.state):
+            place = resolver.resolve_zip_place(event_copy.postal_code)
+            if place is not None:
+                zip_city, zip_state = place
+                if not event_copy.city and zip_city:
+                    event_copy.city = zip_city
+                if not event_copy.state and zip_state:
+                    event_copy.state = zip_state
+
+        normalized.append(event_copy)
+    return normalized
+
+
 def with_home_distances(
     events: Iterable[Event],
     home_query: str,
@@ -2046,7 +2140,8 @@ def refresh_dataset(
     collected = collect_events(session, months_ahead=months_ahead)
     deduped = dedupe_events(collected)
     resolver = CoordinateResolver(cache_path=coord_cache_file)
-    geocoded = annotate_event_coordinates(deduped, resolver)
+    normalized = normalize_event_locations(deduped, resolver)
+    geocoded = annotate_event_coordinates(normalized, resolver)
     dataset = TournamentDataset(
         generated_at=datetime.now(),
         events=sort_events(geocoded, mode="recently_updated"),
