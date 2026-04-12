@@ -90,6 +90,8 @@ It will:
 3. Under **Build and deployment**, choose **GitHub Actions** as the source.
 4. Make sure the workflow file is on the default branch, typically `main`.
 
+If you skip step 3, the workflow can fail during `actions/configure-pages` with a `Get Pages site failed` or `Not Found` error because the repository does not have Pages enabled yet.
+
 After that, GitHub Actions will publish the site to:
 
 `https://<your-github-username>.github.io/<repo-name>/`
