@@ -7,6 +7,7 @@ import json
 import math
 import re
 import warnings
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -43,6 +44,7 @@ DEFAULT_OUTPUT_DIR = Path("output")
 OFFICIAL_CHESS_SOURCE_URL = "https://officialchess.org/events/list/"
 OFFICIAL_CHESS_SITE_ROOT = "https://officialchess.org"
 LITTLE_HOUSE_SOURCE_URL = "https://littlehouseofchess.org/calendar/"
+LITTLE_HOUSE_EVENTS_SOURCE_URL = "https://littlehouseofchess.org/events/"
 LITTLE_HOUSE_SITE_ROOT = "https://littlehouseofchess.org"
 WESTCHESTER_SOURCE_URL = "https://www.westchesterchessclub.com/schedule"
 TRI_STATE_SOURCE_URL = "https://tristatechess.com/onlineregistration/"
@@ -482,6 +484,7 @@ def is_social_or_platform_link(url: str) -> bool:
             "linkedin.com",
             "youtube.com",
             "instagram.com",
+            "whatsapp.com",
             "maps.google.com",
             "google.com/maps",
             "calendar.google.com",
@@ -489,6 +492,7 @@ def is_social_or_platform_link(url: str) -> bool:
             "tel:",
             "uscfsales.com",
             "skvare.com/uscf",
+            "privacy-policy",
         )
     )
 
@@ -805,99 +809,140 @@ def collect_official_chess(session: requests.Session, months_ahead: int) -> list
     )
 
 
-def collect_little_house_of_chess(session: requests.Session, months_ahead: int) -> list[Event]:
-    response = session.get(LITTLE_HOUSE_SOURCE_URL, timeout=30)
+def parse_little_house_event_page(session: requests.Session, event_url: str) -> Event | None:
+    response = session.get(event_url, timeout=30)
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
+
+    title_node = soup.find("h1")
+    title = clean_text(title_node.get_text(" ", strip=True) if title_node else "")
+    if not title:
+        return None
+
+    description_node = soup.select_one(".mec-single-event-description")
+    description = clean_text(description_node.get_text(" ", strip=True) if description_node else soup.get_text(" ", strip=True))
+    summary = summarize_text(description or title)
+
+    register_link = soup.select_one(".mec-booking-button[href]")
+    organizer_website_link = soup.select_one(".mec-organizer-url a[href]")
+    google_calendar_link = soup.select_one(".mec-events-gcal[href]")
+
+    start = None
+    end = None
+    if google_calendar_link is not None:
+        start, end = split_google_calendar_dates(clean_text(google_calendar_link.get("href")))
+
+    venue_name = ""
+    address = ""
+    location_box = soup.select_one(".mec-single-event-location")
+    if location_box is not None:
+        venue_node = location_box.select_one(".author.fn.org")
+        address_node = location_box.select_one(".mec-address")
+        venue_name = clean_text(venue_node.get_text(" ", strip=True) if venue_node else "")
+        address = clean_text(address_node.get_text(" ", strip=True) if address_node else "")
+
+    if not address:
+        address_match = re.search(
+            r"Address:\s*(.+?)\s+([A-Za-z ]+,\s*[A-Za-z ]+\s+\d{5}(?:-\d{4})?)",
+            description,
+            flags=re.IGNORECASE,
+        )
+        if address_match:
+            venue_name = clean_text(address_match.group(1))
+            address = clean_text(address_match.group(2))
+
+    city, state, postal_code = parse_city_state_postal(address)
+    if not city or not state:
+        city, state = parse_city_state_label(address)
+
+    organizer_box = soup.select_one(".mec-single-event-organizer")
+    organizer = ""
+    if organizer_box is not None:
+        organizer_node = organizer_box.select_one(".mec-organizer h6")
+        organizer = clean_text(organizer_node.get_text(" ", strip=True) if organizer_node else "")
+
+    description_links = []
+    if description_node is not None:
+        description_links = [
+            href
+            for href in (link.get("href") for link in description_node.select("a[href]"))
+            if href and href.startswith("http")
+        ]
+
+    registration_url = (
+        canonicalize_url(register_link.get("href", ""))
+        if register_link is not None
+        else canonicalize_url(organizer_website_link.get("href", ""))
+        if organizer_website_link is not None
+        else first_external_link(description_links, excluded_domains=("littlehouseofchess.org",))
+        or canonicalize_url(event_url)
+    )
+    if not organizer:
+        organizer = "Little House of Chess"
+
+    updated_meta = soup.find("meta", attrs={"property": "article:modified_time"})
+    created_meta = soup.find("meta", attrs={"property": "article:published_time"})
+    category = clean_text(
+        " | ".join(link.get_text(" ", strip=True) for link in soup.select(".mec-events-event-categories a"))
+    )
+    time_control = clean_text(
+        " ".join(
+            re.findall(
+                r"(Game/\d+\s*,?\s*d\d+|G/\d+\s*,?\s*d\d+|Game/\d+|G/\d+)",
+                description,
+                flags=re.IGNORECASE,
+            )
+        )
+    )
+
+    event = Event(
+        provider="little_house_of_chess",
+        source="Little House of Chess",
+        title=title,
+        start=start,
+        end=end,
+        source_created_at=parse_iso_datetime(created_meta.get("content")) if created_meta else None,
+        source_updated_at=parse_iso_datetime(updated_meta.get("content")) if updated_meta else None,
+        event_url=canonicalize_url(event_url),
+        registration_url=registration_url,
+        source_url=LITTLE_HOUSE_EVENTS_SOURCE_URL,
+        venue_name=venue_name,
+        address=address,
+        city=city,
+        state=state,
+        postal_code=postal_code,
+        organizer=organizer,
+        summary=summary,
+        description=description,
+        sections=category,
+        entry_fee=extract_entry_fee(description),
+        time_control=time_control,
+    )
+    return classify_event_fit(event)
+
+
+def collect_little_house_of_chess(session: requests.Session, months_ahead: int) -> list[Event]:
+    response = session.get("https://littlehouseofchess.org/mec-events-sitemap.xml", timeout=30)
+    response.raise_for_status()
+    root = ET.fromstring(response.text)
+    namespace = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+    start_day = date.today()
+    end_day = start_day + timedelta(days=31 * months_ahead)
     events: list[Event] = []
 
-    for article in soup.select(".mec-event-article"):
-        title_node = article.select_one(".mec-toggle-title")
-        title = clean_text(title_node.get_text(" ", strip=True) if title_node else "")
-        if not title:
+    for loc in root.findall(".//sm:loc", namespace):
+        event_url = clean_text(loc.text)
+        if not event_url or event_url.rstrip("/") == LITTLE_HOUSE_EVENTS_SOURCE_URL.rstrip("/"):
             continue
-
-        register_link = article.select_one(".mec-booking-button[href]")
-        organizer_website_link = article.select_one(".mec-organizer-url a[href]")
-        google_calendar_link = article.select_one(".mec-events-gcal[href]")
-        ical_link = article.select_one('a[href*="?method=ical"]')
-        location_box = article.select_one(".mec-single-event-location")
-        organizer_box = article.select_one(".mec-single-event-organizer")
-
-        venue_name = ""
-        address = ""
-        if location_box is not None:
-            venue_node = location_box.select_one(".author.fn.org")
-            address_node = location_box.select_one(".mec-address")
-            venue_name = clean_text(venue_node.get_text(" ", strip=True) if venue_node else "")
-            address = clean_text(address_node.get_text(" ", strip=True) if address_node else "")
-
-        city, state, postal_code = parse_city_state_postal(address)
-        if not city or not state:
-            city, state = parse_city_state_label(address)
-        organizer = ""
-        if organizer_box is not None:
-            organizer_node = organizer_box.select_one(".mec-organizer h6")
-            organizer = clean_text(organizer_node.get_text(" ", strip=True) if organizer_node else "")
-
-        start = None
-        end = None
-        if google_calendar_link is not None:
-            start, end = split_google_calendar_dates(clean_text(google_calendar_link.get("href")))
-
-        description = clean_text(
-            " ".join(
-                item.get_text(" ", strip=True)
-                for item in article.select(".mec-toggle-content, .mec-content-toggle")
-            )
-        )
-        summary = summarize_text(description or title)
-        category = clean_text(
-            " | ".join(
-                link.get_text(" ", strip=True)
-                for link in article.select(".mec-single-event-category a")
-            )
-        )
-        time_control = clean_text(
-            " ".join(
-                re.findall(r"(Game/\d+\s*,?\s*d\d+|G/\d+\s*,?\s*d\d+|Game/\d+|G/\d+)", description, flags=re.IGNORECASE)
-            )
-        )
-
-        registration_url = canonicalize_url(
-            (register_link or organizer_website_link or google_calendar_link or ical_link).get("href", "")
-            if (register_link or organizer_website_link or google_calendar_link or ical_link)
-            else ""
-        )
-        source_event_url = canonicalize_url(ical_link.get("href", "") if ical_link else "") or LITTLE_HOUSE_SOURCE_URL
-        source_updated_at = None
-        ical_url = clean_text(ical_link.get("href", "") if ical_link else "")
-        ical_match = re.search(r"[?&]id=(\d+)", ical_url)
-        if ical_match:
-            source_event_url = f"{LITTLE_HOUSE_SOURCE_URL}#mec-event-{ical_match.group(1)}"
-
-        event = Event(
-            provider="little_house_of_chess",
-            source="Little House of Chess",
-            title=title,
-            start=start,
-            end=end,
-            source_updated_at=source_updated_at,
-            event_url=source_event_url,
-            registration_url=registration_url,
-            source_url=LITTLE_HOUSE_SOURCE_URL,
-            venue_name=venue_name,
-            address=address,
-            city=city,
-            state=state,
-            postal_code=postal_code,
-            organizer=organizer,
-            summary=summary,
-            description=description,
-            sections=category,
-            time_control=time_control,
-        )
-        events.append(classify_event_fit(event))
+        try:
+            event = parse_little_house_event_page(session, event_url)
+        except Exception:
+            continue
+        if event is None or event.start is None:
+            continue
+        if event.start.date() < start_day or event.start.date() > end_day:
+            continue
+        events.append(event)
 
     return events
 
