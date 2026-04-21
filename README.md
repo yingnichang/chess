@@ -1,135 +1,116 @@
-# New York Chess Tournament Finder
+# US Chess Tournament Data Export
 
-This project now builds a free public GitHub Pages site for finding chess tournaments in the New York area. It refreshes live tournament data, keeps source and registration links, and lets parents filter by date, location, source, scholastic fit, beginner-friendliness, and estimated driving range from a home ZIP code.
+This project fetches US Chess tournament history and game history for one or more players, then exports the results to CSV files.
 
-## What the site does
+The current script also builds a rating-improvement plan for a target player by comparing that player's progress against the current top finishers from a standings page.
 
-- Pulls upcoming tournament listings from live web sources
-- Sorts by most recently updated source listings by default
-- Keeps direct registration links and source listing links
-- Lets visitors filter by date range, state, city, source, and search text
-- Supports a home ZIP code drive filter in the browser
-- Publishes as a free public GitHub Pages site
-- Refreshes automatically every day through GitHub Actions
+## Current Behavior
 
-## Current data sources
+Running `tournament_data.py` currently does the following:
 
-- `officialchess.org` via its live events API
-- `littlehouseofchess.org/calendar/`
-- `www.events4chess.com/events/`
-- `new.uschess.org/upcoming-tournaments` filtered to New York
-- `chessintheschools.org/tournament/`
-- `chessfather.com/tournaments`
-- `tristatechess.com/onlineregistration/`
-- `icanj.net` tournament calendar
-- `westchesterchessclub.com` schedule page
+1. Scrapes the top `10` player IDs from the standings page at `https://chessevents.com/event/nyscholastics/2026/standings/kcc`
+2. Pulls tournament history from the US Chess member events API
+3. Pulls section-based rating changes from the US Chess sections API
+4. Pulls game history from the US Chess games API
+5. Writes combined CSV exports for all selected players
+6. Builds a 365-day monthly target plan for player `32496478`
 
-`Official Chess` remains the highest-quality structured source because it exposes event creation and modification timestamps, venue details, organizers, and direct source URLs. The app also pulls from additional organizer and calendar pages to improve coverage across New York, New Jersey, and nearby scholastic events.
+## Files
 
-For `littlehouseofchess.org`, the build also keeps a tracked fallback snapshot so GitHub-hosted rebuilds do not drop that source entirely if Little House temporarily rate-limits or blocks a runner IP.
+- `tournament_data.py`: main data collection and planning script
+- `requirements.txt`: Python dependencies
+- `uschess_players_tournament_history.csv`: combined tournament history export
+- `uschess_players_games.csv`: combined games export
+- `uschess_target_player_32496478_plan.csv`: generated target-player rating plan
 
-## Install dependencies
+## Outputs
 
-```powershell
-.\.venv\bin\pip.exe install -r requirements.txt
+### Tournament History CSV
+
+`uschess_players_tournament_history.csv` includes event metadata plus rating details when available, including fields such as:
+
+- `playerId`
+- `id`
+- `name`
+- `startDate`
+- `endDate`
+- `stateCode`
+- `historySection`
+- `ratingSummary`
+- `regularRatingBefore`
+- `regularRatingAfter`
+- `regularRatingChange`
+- `quickRatingBefore`
+- `quickRatingAfter`
+- `blitzRatingBefore`
+- `blitzRatingAfter`
+
+### Games CSV
+
+`uschess_players_games.csv` includes fields such as:
+
+- `playerId`
+- `eventId`
+- `eventName`
+- `eventStartDate`
+- `eventEndDate`
+- `sectionName`
+- `sectionNumber`
+- `ratingSystem`
+- `gameDate`
+- `color`
+- `result`
+- `opponentId`
+- `opponentName`
+
+Note: the US Chess games API does not provide per-game rating changes, so `ratingBefore` and `ratingAfter` are left blank.
+
+### Target Plan CSV
+
+`uschess_target_player_32496478_plan.csv` includes the target player's planned rating checkpoints, with fields such as:
+
+- `targetPlayerId`
+- `referenceTopPlayerId`
+- `referenceTopPlayerName`
+- `frequency`
+- `periodStart`
+- `periodEnd`
+- `targetRegularRating`
+- `periodGainNeeded`
+- `eventPeriod`
+- `suggestedPattern`
+
+## Setup
+
+Install the Python packages:
+
+```bash
+pip install -r requirements.txt
 ```
 
-Or without the repo virtual environment:
+Install the Playwright browser used for standings-page scraping:
 
-```powershell
-python -m pip install -r requirements.txt
+```bash
+python -m playwright install chromium
 ```
 
-## Build the static site locally
+## Run
 
-```powershell
-.\.venv\bin\python.exe build_pages.py --force-refresh
+```bash
+python tournament_data.py
 ```
 
-This generates:
+## Configuration
 
-- `site/index.html`
-- `site/data/tournaments.json`
-- `site/data/tournaments.csv`
+The script is currently configured through constants near the top of `tournament_data.py`.
 
-## Preview locally
+Important defaults:
 
-After building the site:
+- `STANDINGS_URL = "https://chessevents.com/event/nyscholastics/2026/standings/kcc"`
+- `TOP_N = 10`
+- `TARGET_PLAYER_ID = "32496478"`
+- `TARGET_PLAN_DAYS = 365`
+- `TARGET_PLAN_FREQUENCY = "monthly"`
+- `TARGET_TOP_GROUP_BLEND = 0.75`
 
-```powershell
-python -m http.server 8000 -d site
-```
-
-Then open [http://127.0.0.1:8000](http://127.0.0.1:8000).
-
-## Refresh and export without building Pages
-
-```powershell
-.\.venv\bin\python.exe chess_tournament.py --force-refresh
-```
-
-This generates:
-
-- `output/nearby_chess_tournaments.csv`
-- `output/nearby_chess_tournaments.html`
-
-Useful examples:
-
-```powershell
-.\.venv\bin\python.exe chess_tournament.py --home 10583 --max-drive-minutes 120
-.\.venv\bin\python.exe chess_tournament.py --search Brooklyn --scholastic-only
-.\.venv\bin\python.exe chess_tournament.py --states NY,NJ,CT --sort date
-```
-
-## Publish on GitHub Pages
-
-This repo includes a GitHub Actions workflow at `.github/workflows/deploy-pages.yml`.
-
-It will:
-
-- Build the static site
-- Upload the built `site/` folder as the Pages artifact
-- Deploy it to GitHub Pages
-- Rebuild it daily on a schedule
-
-### One-time GitHub setup
-
-1. Push the repo to GitHub.
-2. In GitHub, open `Settings` -> `Pages`.
-3. Under **Build and deployment**, choose **GitHub Actions** as the source.
-4. Make sure the workflow file is on the default branch, typically `main`.
-
-If you skip step 3, the workflow can fail during `actions/configure-pages` with a `Get Pages site failed` or `Not Found` error because the repository does not have Pages enabled yet.
-
-After that, GitHub Actions will publish the site to:
-
-`https://<your-github-username>.github.io/<repo-name>/`
-
-For this repo, the public URL will be:
-
-`https://yingnichang.github.io/chess/`
-
-once the workflow runs successfully from `main`.
-
-## Daily refresh schedule
-
-The workflow uses this cron schedule:
-
-```text
-0 12 * * *
-```
-
-GitHub Actions schedules are in UTC. On **April 11, 2026**, New York is on EDT, so that schedule is **8:00 AM New York time**.
-
-Two practical notes:
-
-- GitHub Actions schedules are best-effort and may run a little late.
-- During standard time in winter, `12:00 UTC` becomes `7:00 AM` in New York unless you change the workflow seasonally.
-
-## Notes
-
-- Drive time is an estimate based on geographic distance. It is useful for screening events, but you should still check a real navigation app before registering.
-- The browser-side drive filter works best with a 5-digit US ZIP code.
-- The cache lives in `data/tournaments_cache.json`.
-- Coordinate lookups are cached in `data/coordinate_cache.json`.
-- If a live refresh fails during a workflow run, the currently published GitHub Pages site stays on the previous successful deployment.
+If you do not want to scrape the standings page, you can clear `STANDINGS_URL` and populate `PLAYER_IDS` manually.
