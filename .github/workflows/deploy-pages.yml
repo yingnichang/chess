@@ -35,6 +35,9 @@ jobs:
           pip install -r requirements.txt
 
       - name: Build static site
+        env:
+          ANALYTICS_PROVIDER: ${{ vars.ANALYTICS_PROVIDER }}
+          ANALYTICS_SITE: ${{ vars.ANALYTICS_SITE }}
         run: python build_pages.py --force-refresh
 
       - name: Configure Pages

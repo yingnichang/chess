@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -17,6 +18,8 @@ from tournament_data import (
 
 PAGES_SOURCE_DIR = Path("pages_src")
 PAGES_BUILD_DIR = Path("site")
+ANALYTICS_PROVIDER_PLACEHOLDER = "__ANALYTICS_PROVIDER__"
+ANALYTICS_SITE_PLACEHOLDER = "__ANALYTICS_SITE__"
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,6 +29,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-refresh", action="store_true")
     parser.add_argument("--max-age-hours", type=int, default=24)
     parser.add_argument("--months-ahead", type=int, default=DEFAULT_MONTHS_AHEAD)
+    parser.add_argument(
+        "--analytics-provider",
+        choices=["none", "goatcounter"],
+        default=os.getenv("ANALYTICS_PROVIDER", "none"),
+        help="Analytics provider to inject into the static site.",
+    )
+    parser.add_argument(
+        "--analytics-site",
+        default=os.getenv("ANALYTICS_SITE", ""),
+        help="Analytics site code, such as a GoatCounter code or full GoatCounter URL.",
+    )
     return parser.parse_args()
 
 
@@ -43,6 +57,11 @@ def main() -> int:
     if build_dir.exists():
         shutil.rmtree(build_dir)
     shutil.copytree(PAGES_SOURCE_DIR, build_dir)
+    configure_analytics(
+        build_dir / "index.html",
+        provider=args.analytics_provider,
+        site=args.analytics_site,
+    )
 
     data_dir = build_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -59,6 +78,18 @@ def main() -> int:
     print(f"Dataset generated at: {dataset.generated_at:%Y-%m-%d %H:%M}")
     print(f"Event count: {len(dataset.events)}")
     return 0
+
+
+def configure_analytics(index_path: Path, provider: str, site: str) -> None:
+    provider = (provider or "none").strip().lower()
+    site = (site or "").strip()
+    if provider == "goatcounter" and not site:
+        provider = "none"
+
+    html = index_path.read_text(encoding="utf-8")
+    html = html.replace(ANALYTICS_PROVIDER_PLACEHOLDER, provider)
+    html = html.replace(ANALYTICS_SITE_PLACEHOLDER, site)
+    index_path.write_text(html, encoding="utf-8")
 
 
 if __name__ == "__main__":

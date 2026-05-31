@@ -29,6 +29,10 @@
           <span class="meta-label">Events cached</span>
           <strong id="total-cached">-</strong>
         </div>
+        <div class="meta-chip hidden" id="visitor-count-chip">
+          <span class="meta-label">Tracked views</span>
+          <strong id="visitor-count">-</strong>
+        </div>
       </div>
     </section>
 
@@ -179,5 +183,11 @@
   </div>
 
   <script src="assets/app.js" defer></script>
+  <script
+    src="assets/analytics.js"
+    data-analytics-provider="__ANALYTICS_PROVIDER__"
+    data-analytics-site="__ANALYTICS_SITE__"
+    defer
+  ></script>
 </body>
 </html>

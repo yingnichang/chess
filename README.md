@@ -128,6 +128,27 @@ python -m http.server 8000 -d site
 
 Then open [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
+### Visitor Tracking
+
+The Pages site can record privacy-friendly page views with GoatCounter and show a tracked total in the hero.
+
+1. Create a GoatCounter site at [goatcounter.com](https://www.goatcounter.com/).
+2. Enable the public visitor counter setting for that GoatCounter site if you want the number to appear on the page.
+3. Build with your GoatCounter code:
+
+```bash
+python build_pages.py --analytics-provider goatcounter --analytics-site YOUR_GOATCOUNTER_CODE
+```
+
+For GitHub Actions, set repository variables or environment values:
+
+```bash
+ANALYTICS_PROVIDER=goatcounter
+ANALYTICS_SITE=YOUR_GOATCOUNTER_CODE
+```
+
+Tracking starts only after the updated site is deployed. Past visits before analytics was enabled cannot be recovered from this static site.
+
 ### Browser Features
 
 The current frontend supports:
