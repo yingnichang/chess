@@ -47,6 +47,13 @@ Install the Python dependencies:
 python -m pip install -r requirements.txt
 ```
 
+To install into a repository-local virtual environment from PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
 The pinned dependency list currently includes:
 
 - `requests`
